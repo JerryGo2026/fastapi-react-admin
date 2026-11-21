@@ -407,7 +407,7 @@ Google Drive 那种：标题「正在上传 N 项内容」、副栏「还剩 X�
 **修法**：`TabFrame` 用 context 下发自己的根节点，浮层 `container={useTabPortalContainer()}`
 （`SheetContent` 透传给 `SheetPortal`）。tab 进后台时根节点 `display:none`，抽屉跟着藏；
 里面的 state 原样保活，切回来草稿还在。后台那个「开着」的抽屉不会把前台变成 inert
-（E2E 里切过去之后照样点得动标签条）。⚠️ 整页滚动模式下的滚动锁**没单独验过**。
+（E2E 里切过去之后照样点得动标签条）。整页滚动模式下的滚动锁见下面「两种滚动方式 × 后台浮层」（#421）。
 
 走过的三条弯路，全部实测踩过：
 
@@ -437,8 +437,21 @@ E2E 实测弹窗带着 `data-closed` 在屏幕上停了 5 秒还 visible。
 
 **又踩了三处（2026-11-09）**：数据变更详情的「看这次请求的操作日志」（连关都没做，抽屉开着压在操作日志页上，用户截图报的）· 操作日志详情的「还有 N 条」· 🔴 **下拉菜单也会**：`ExportButton` 的「导出记录」、`RowActions` 里 `render` 成 `<Link>` 的项，菜单飘在新页面左上角（锚点跟着 tab 藏了）。那条 E2E 只断言了地址栏 —— **跳页链接的用例要再断言浮层 `toBeHidden()`、在新页面上点一下**。
 抽屉照上面 `mounted` + `open`（`log-change` / `log-opera` 里挂载的就是记录本身，关只翻 `open`、`onLeave` 清记录）；菜单的开合在 Base UI 里、没有 `mounted` 可清，改成**换 `key` 重挂**（`useReducer((k) => k + 1, 0)`，链接 `onClick` 里 +1），两个共用组件已内置，页面用它们就不用管。只关不卸照样红（变异实测）。
-菜单没改走 `useTabPortalContainer`：挂进带滚动的内容区，靠近底部的菜单可能被裁 —— **推断，没实测**。
+菜单没改走 `useTabPortalContainer`，照旧挂 `<body>`。原来这里写「挂进内容区会被裁」是推断，**#421 实测推翻**：把菜单 portal 临时改进可见页签，贴底那一行的菜单照样完整、在最上层，两种滚动方式都是（原因没深挖，猜是内容区 / 页签都不是 Positioner 的定位祖先）。挂 `<body>` 的真正理由是浮层不该跟着页签藏 / 滚。
 **实测证据**：`overlay-leave.spec.ts`（两个共用组件）· `data-change.spec.ts`（两个抽屉），去掉修法四条都红在 `toBeHidden`（`Received: visible`）。
+
+### 两种滚动方式 × 后台浮层（#421，`tab-overlay-boundary.spec.ts`）
+
+| 浮层 | portal 挂哪 | 后台时 |
+|---|---|---|
+| URL 驱动的抽屉（审批发起 / 详情、公告读者 / 阅读统计、AI 预审统计） | 本 tab 根节点（`useTabPortalContainer`） | 跟着 `display:none`；effect 被 `<Activity>` 销毁 → 滚动锁、inert 一并释放 |
+| 外壳家具（铃铛面板、帮助 / 用户菜单） | `<body>`（不在任何 tab，context 是 `undefined`） | 不涉及 |
+| 页面里点出来的下拉菜单 / 行操作 | `<body>` | 切走前已关；跳页链接见上一节 |
+
+- 🔴 **滚动锁只在整页滚动下才伤人**：变异「hidden 页签保留 effect」后，后台抽屉一直锁着 `<html>`，`page` 模式前台滚不动、`content` 模式照样能滚（滚的是内容层），而且前台照样**点得动** —— 只断言「能点」抓不到。用例两种模式各跑一遍，滚轮断言按模式分：`page` 看 `window.scrollY`，`content` 看视口不动、内容层动
+- ⚠️ **Base UI 的滚动锁不一定加属性**：页面没溢出、滚动条是覆盖式时只在 `<html>` / `<body>` 写内联 `overflow: hidden`，没有 `data-base-ui-scroll-locked`（`@base-ui/utils` 0.3.2 的 useScrollLock）。只认属性会把「锁着」读成「没锁」—— 第一版就红在这里
+- 刷新时**从 sessionStorage 恢复到后台**的页签，URL 驱动的抽屉根本不挂：Base UI 建 portal 节点靠 effect，hidden 的 `<Activity>` 不跑 effect（实测 `?start=` 在、`wf-start-sheet` 节点 0 个，去掉 `container` 也一样）。原始 bug 的现场是「刷新后在那页**打开着**、再切走」，用例两段都测
+- 贴底的行操作菜单会翻到上方（Positioner 默认 `flip`），关掉 flip 后不翻、被 `max-h-(--available-height)` 压成两行内滚 —— 用例逐项做 `elementFromPoint` 命中，变异 `collisionAvoidance={{ side: 'none' }}` 红在第 3 项
 
 ### 🔴 不在任何 tab 里的浮层：`container` 要给 `undefined`，不能给 `null`
 
