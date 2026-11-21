@@ -9,6 +9,7 @@ setup.mjs            关登录验证码 · 造测试数据 · 把流程要的值
 subflows/login.yaml  冷启动 → 清登录态 → 账号密码登录（两条流程共用）
 flows/admin-users.yaml   登录 → 应用页 → 用户列表翻页 → 搜索 → 详情 → 删除确认 → toast
 flows/perm-gate.yaml     没角色的账号：应用页没有「用户」，并且明说「没有授权」
+flows/server-from-login.yaml  没登录时在登录屏换服务器（#406）：坏地址报错 → 好地址保存 → 用新地址登录
 ```
 
 跑的地方是 `.github/workflows/mobile-e2e.yml`（#137）：起后端（和 `.github/workflows/ci.yml` 里
@@ -157,3 +158,13 @@ App 从模拟器里经 `http://10.0.2.2:8001` 打通了后端（后端日志里�
   原生那一段还是每次从头编
 - 失败时的截图、界面层级、logcat 都在 `maestro-debug` 这个 artifact 里。
   **排错先看截图** —— 上面两个坑都是截图和 logcat 说清楚的，Maestro 自己那句报错两次都指错了方向
+
+## 「登录屏换服务器」要第二个地址：`adb reverse tcp:8001 tcp:8001`（#406）
+
+`flows/server-from-login.yaml` 要一个和焊进包里的 `10.0.2.2:8001` **不同、但连得上同一个后端**的地址 —— 地址没变「保存」按钮一直是灰的。
+workflow 在装包之后加了一句 `adb reverse`，流程里填 `http://127.0.0.1:8001`；坏地址用 `http://10.0.2.2:9`（拒绝连接，立刻失败）。
+🔴 **预填过的输入框不要靠 `tapOn` + `eraseText` 清空。** 症状：第一次 CI 跑这条流程，存「`http://127.0.0.1:8001`」那一步一直等不到回到登录屏。
+截图里输入框是 `http://127.0.0.1:8001001`、保存键灰着（端口非法），上一步的坏地址实际探的是 `10.0.2.2:9001` —— 也连不上，那一步**碰巧**绿了。
+根因：表单预填了当前地址，`tapOn` 把光标落在文字中间（不是末尾），`eraseText` 发的是退格，只删光标**前面**那半截，后半截 `001` 留着、新输入插在它前面。
+修法：表单加了「清空」按钮（`server-clear`，Android 没有 iOS 的 `clearButtonMode`，真人也用得上），流程里先点它再点输入框输入。
+实测证据：run 44919992820 的 `maestro-debug` 里 `server-from-login/screenshots/step-021-*.png`。
