@@ -105,8 +105,8 @@ class Settings(BaseSettings):
     CACHE_PUBSUB_RECONNECT_MAX_DELAY: int = 60
 
     # .env Snowflake
-    # 固定节点（下面两个都配）只给单进程用：启动时也在 Redis 里占租约，同一个号被别的活着的进程占着就拒绝启动（#401）。
-    # 读同一份 .env 的多个进程（`--workers 2`、celery worker）请留空，走动态分配
+    # 固定节点（下面两个都配）启动时也在 Redis 里占租约（#401）；同一个号被别的进程占着（读同一份 .env 的
+    # `--workers 2`、celery worker，或刚被杀掉的上一个进程）就退回动态分配、记一条 warning，不会撞号
     SNOWFLAKE_ENABLED: bool = False
     SNOWFLAKE_DATACENTER_ID: int | None = None
     SNOWFLAKE_WORKER_ID: int | None = None

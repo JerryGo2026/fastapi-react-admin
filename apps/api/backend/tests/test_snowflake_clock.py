@@ -64,3 +64,29 @@ def test_a_rollback_beyond_the_tolerance_is_refused(monkeypatch: pytest.MonkeyPa
     clock['ms'] -= SnowflakeConfig.CLOCK_BACKWARD_TOLERANCE_MS + 1
     with pytest.raises(errors.ServerError):
         gen.generate()
+
+
+def test_a_burst_that_borrows_the_next_millisecond_is_not_reported_as_a_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一毫秒序号用满借了下一毫秒：`now` 落后于 last_timestamp，但系统时钟没往回走，不能告警「时钟回拨」"""
+    import backend.utils.snowflake as snowflake_mod
+
+    gen = Snowflake()
+    gen.datacenter_id, gen.worker_id, gen._initialized = 0, 0, True
+    clock = {'ms': 1_800_000_000_000}
+    monkeypatch.setattr(gen, '_current_ms', lambda: clock['ms'])
+    warnings: list[str] = []
+    monkeypatch.setattr(snowflake_mod.log, 'warning', warnings.append)
+
+    ids = [gen.generate() for _ in range(5_000)]  # 同一毫秒里跨过一次 4096
+    clock['ms'] += 1
+    ids.append(gen.generate())
+    assert len(set(ids)) == len(ids)
+    assert warnings == []
+
+    clock['ms'] -= 3_000  # 真的回拨
+    gen.generate()
+    gen.generate()
+    assert len(warnings) == 1
+    assert '3000 ms' in warnings[0] or '3001 ms' in warnings[0]

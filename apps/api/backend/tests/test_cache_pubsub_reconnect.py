@@ -46,6 +46,9 @@ class _FakeRedis:
     def __call__(self, **_: Any) -> '_FakeRedis':
         return self
 
+    def set_retry(self, _: object) -> None:
+        pass
+
     def pubsub(self) -> _FakePubSub:
         return _FakePubSub(self)
 
@@ -107,3 +110,52 @@ def test_keeps_retrying_past_the_old_limit_and_clears_local_cache_on_resubscribe
     # 退避：越等越久，但有上限
     assert no_wait[1] > no_wait[0]
     assert max(no_wait) <= pubsub_module.settings.CACHE_PUBSUB_RECONNECT_MAX_DELAY
+
+
+def test_a_connection_drop_that_redis_py_reconnects_by_itself_still_clears_the_local_cache(
+    monkeypatch: pytest.MonkeyPatch, no_wait: list[float]
+) -> None:
+    """🔴 评审发现：redis-py 的 PubSub 读消息时自带重试（默认 3 次、指数退避），断线后在 `listen()` 里
+    **自己**重连、重新订阅，外层循环看不到异常 —— 短暂断线（Redis 重启几秒）期间漏掉的失效消息就这么丢了，
+    本地缓存也没清。订阅连接要关掉库内重试，每次断线都走外层「重新订阅 + 清缓存」那条路。
+
+    真 Redis：`CLIENT KILL` 掉订阅那条连接（只杀它，不碰别的订阅者）。不用共享的 `redis_client`
+    （`asyncio.run` 会关掉它绑的循环，见 tests 分册），这里的客户端都是自己建、自己关的
+    """
+    from backend.database.redis import RedisCli
+
+    channel = f'fba:test:cache-invalidate:{id(no_wait)}'
+    monkeypatch.setattr(pubsub_module.settings, 'CACHE_PUBSUB_CHANNEL', channel)
+
+    async def pubsub_ids(admin: RedisCli) -> set[str]:
+        return {c['id'] for c in await admin.client_list(_type='pubsub')}
+
+    async def scenario() -> None:
+        admin = RedisCli()
+        before = await pubsub_ids(admin)
+        task = asyncio.create_task(pubsub_module.CachePubSubManager.subscribe_and_listen())
+        try:
+            for _ in range(200):
+                if (await admin.pubsub_numsub(channel))[0][1] >= 1:
+                    break
+                await asyncio.sleep(0.02)
+            mine = await pubsub_ids(admin) - before
+            assert len(mine) == 1
+
+            local_cache_manager.set('fba:cache:dict:stale-after-blip', 'old value')
+            await admin.client_kill_filter(_id=mine.pop())
+            for _ in range(250):
+                if local_cache_manager.get('fba:cache:dict:stale-after-blip') is None:
+                    break
+                await asyncio.sleep(0.02)
+            assert local_cache_manager.get('fba:cache:dict:stale-after-blip') is None, (
+                '断线后 redis-py 在 listen() 里悄悄重连了，外层没有清本地缓存'
+            )
+            assert not task.done()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await admin.aclose()
+
+    asyncio.run(scenario())

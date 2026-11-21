@@ -135,16 +135,29 @@ def _other_reading(created: datetime) -> datetime | None:
     return other if other.utcoffset() != wall.utcoffset() else None
 
 
-def signature_matches(prev: str, row: Mapping[str, Any], key: bytes, kid: str, stored: str) -> bool:
+def _stores_wall_clock(session: Session) -> bool:
+    """`created_time` 读回来是不是「补上应用时区的墙上时间」—— 只有 MySQL（`DATETIME(6)` 不存偏移）"""
+    return session.get_bind().dialect.name == 'mysql'
+
+
+def signature_matches(
+    prev: str, row: Mapping[str, Any], key: bytes, kid: str, stored: str, *, wall_clock_storage: bool = False
+) -> bool:
     """签名对不对得上。
 
     🔴 MySQL + 有夏令时的 `DATETIME_TIMEZONE`（#401）：`created_time` 存成不带偏移的 `DATETIME(6)`，秋季回拨那一小时
     第二次出现的时刻读回来被当成第一次（早一小时），换算成 UTC 和签名差一小时 —— 那一小时写的行全部报 `modified`。
     签名照旧按写入时的真实时刻算（已有的行不重签、迁移链不动），校验时墙上时间有歧义的话两种读法都认。
-    放宽的只有「同一个墙上时间的两种读法」：别的时间改动照样对不上。PostgreSQL / SQL Server 存偏移，第一种读法就对得上
+    放宽的只有「同一个墙上时间的两种读法」：别的时间改动照样对不上。
+
+    🔴 **只对 MySQL 放宽**（`wall_clock_storage`，评审改的）。PostgreSQL / SQL Server 存偏移，读回来就是真实时刻，
+    第一种读法就对得上；在那里放宽只剩一个作用 —— 把那一小时里某行的时间改早 / 改晚恰好一小时也能通过校验。
+    MySQL 上这一小时本来就分不出（库里存的就是同一个墙上时间），放宽不丢信息
     """
     if hmac.compare_digest(sign(prev, row, key, kid), stored):
         return True
+    if not wall_clock_storage:
+        return False
     created = row.get('created_time')
     if not isinstance(created, datetime):
         return False
@@ -382,6 +395,7 @@ def _walk(session: Session, records: sa.Table, head: Mapping[str, Any] | None, f
     anchor_seq = head['anchor_seq'] if head else 0
     walk = _Walk(last_seq=anchor_seq, last_hash=(head['anchor_hash'] if head else '') or '')
     seen_current_key = False
+    wall_clock = _stores_wall_clock(session)
     for row in _chained_rows(session, records, anchor_seq, head['head_seq'] if head else None):
         walk.checked += 1
         stored = row['chain_hash'] or ''
@@ -397,7 +411,9 @@ def _walk(session: Session, records: sa.Table, head: Mapping[str, Any] | None, f
         else:
             seen_current_key = seen_current_key or row_kid == kid
             # 前面少了几行时，这一行签名里的「上一行」已经不在了，重算不了；缺口已经报过
-            if not gap and not signature_matches(walk.last_hash, row, keys[row_kid], row_kid, stored):
+            if not gap and not signature_matches(
+                walk.last_hash, row, keys[row_kid], row_kid, stored, wall_clock_storage=wall_clock
+            ):
                 found.add(_problem('modified', row))
         walk.last_seq, walk.last_hash, walk.last_kid = row['chain_seq'], stored, row_kid
     return walk

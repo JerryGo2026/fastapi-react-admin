@@ -20,6 +20,7 @@ from pyrate_limiter import Duration, Rate
 from backend.app.admin.service.file_service import file_service
 from backend.common.exception import errors
 from backend.common.i18n import t
+from backend.common.pagination import MAX_PAGE
 from backend.common.response.response_schema import ResponseModel, response_base
 from backend.common.security.jwt import DependsJwtAuth
 from backend.common.security.permission import RequestPermission
@@ -65,7 +66,8 @@ _AI_ASSIST_LIMIT = Depends(RateLimiter(Rate(10, Duration.MINUTE), identifier=_pe
 
 router = APIRouter()
 
-Page = Annotated[int, Query(ge=1, description='页码')]
+# 上界同 `common/pagination.py`（#401）：不设的话超大页码让 OFFSET 溢出，回 500 而不是 422
+Page = Annotated[int, Query(ge=1, le=MAX_PAGE, description='页码')]
 Size = Annotated[int, Query(ge=1, le=100, description='每页数量')]
 Keyword = Annotated[str | None, Query(max_length=64, description='标题 / 摘要关键字')]
 Pk = Annotated[int, Path(description='ID')]

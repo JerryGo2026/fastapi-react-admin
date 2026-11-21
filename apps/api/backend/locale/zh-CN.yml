@@ -279,7 +279,6 @@ error:
     clock_moved_backwards: 雪花 ID 生成失败，时钟回拨超过 {ms} ms，请立即联系系统管理员
     config_failed: 雪花算法配置失败，请联系系统管理员
     datacenter_config_failed: 雪花算法数据中心配置失败，请联系系统管理员
-    fixed_node_taken: 雪花算法固定节点 {datacenter_id}/{worker_id} 已被其他进程占用 —— 读同一份 .env 的多个进程（多个 uvicorn worker、celery worker）不能共用固定节点，请去掉 SNOWFLAKE_DATACENTER_ID / SNOWFLAKE_WORKER_ID 改用动态分配，或给每个进程配不同的值
     generation_failed: 雪花 ID 生成失败，雪花算法未初始化
     lease_lost: 雪花 ID 生成失败，本进程的雪花节点租约已失效（心跳未续上或节点被其他进程占用），请联系系统管理员
     no_node_available: 无可用的雪花算法节点，节点已耗尽

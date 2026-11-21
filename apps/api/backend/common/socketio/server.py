@@ -87,7 +87,9 @@ async def _mark_online(sid: str, session_uuid: str) -> None:
 async def refresh_presence() -> None:
     """给本进程连着的每条 socket 续期（key 丢了就写回去）"""
     for sid, session_uuid in list(_local_sids.items()):
-        await _mark_online(sid, session_uuid)
+        # 遍历的是快照、每个 sid 一次 await：途中断开的连接已经被 `disconnect` 删了 key，不能再写回来
+        if _local_sids.get(sid) == session_uuid:
+            await _mark_online(sid, session_uuid)
 
 
 async def presence_heartbeat() -> None:
@@ -105,7 +107,7 @@ async def sweep_presence_keys() -> None:
     不再使用的全站集合直接删掉。多副本下也安全 —— 只给「没有 TTL」的 key 加 TTL，不删别的进程的连接"""
     prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
     await redis_client.delete(prefix)
-    async for key in redis_client.scan_iter(match=f'{prefix}:*'):
+    async for key in redis_client.scan_iter(match=f'{prefix}:*', count=1000):
         await redis_client.eval(_EXPIRE_IF_PERSISTENT, 1, key, str(settings.TOKEN_ONLINE_TTL_SECONDS))
 
 
@@ -135,8 +137,8 @@ async def connect(sid, environ, auth) -> bool:
         if settings.ENVIRONMENT == 'prod':
             log.error('WebSocket 连接失败：生产环境禁止免授权直连')
             return False
-        _local_sids[sid] = session_uuid
         await _mark_online(sid, session_uuid)
+        _local_sids[sid] = session_uuid
         return True
 
     try:
@@ -158,8 +160,10 @@ async def connect(sid, environ, auth) -> bool:
     # 广播型通知（公告）不需要它，但预留成本只有这一行。
     await sio.enter_room(sid, user_room(user.id))
 
-    _local_sids[sid] = session_uuid
+    # 🔴 先写 Redis、成功了才记进连接表（评审发现）：写 Redis 抛了 → 握手被拒、socketio 不会为它调 `disconnect`，
+    # 先记表的话这个 sid 永远留在表里，心跳每拍把它写回去 —— 一个连不上的连接永久「在线」
     await _mark_online(sid, session_uuid)
+    _local_sids[sid] = session_uuid
     return True
 
 

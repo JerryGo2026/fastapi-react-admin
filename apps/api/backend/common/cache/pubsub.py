@@ -1,6 +1,9 @@
 import asyncio
 import json
 
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
+
 from backend.common.cache.local import local_cache_manager
 from backend.common.log import log
 from backend.core.conf import settings
@@ -71,6 +74,10 @@ class CachePubSubManager:
             try:
                 # 使用独立连接
                 pubsub_client = RedisCli(socket_timeout=None)
+                # 🔴 关掉 redis-py 的库内重试（评审发现）：默认 3 次，断线后在 `listen()` 里自己重连、重新订阅，
+                # 不抛异常 —— 外层看不到断线，断线期间漏掉的失效消息丢了、本地缓存也不清。
+                # 不重试 = 每次断线都走下面「重新订阅 + 清本地缓存」那条路
+                pubsub_client.set_retry(Retry(NoBackoff(), 0))
                 pubsub = pubsub_client.pubsub()
                 await pubsub.subscribe(settings.CACHE_PUBSUB_CHANNEL)
                 # 订阅上了：断线期间漏掉的通知补不回来，整份本地缓存作废

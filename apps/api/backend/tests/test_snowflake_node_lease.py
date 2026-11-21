@@ -233,13 +233,16 @@ def fixed_node(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
     monkeypatch.setattr(settings, 'SNOWFLAKE_NODE_TTL_SECONDS', 1)
     monkeypatch.setattr(settings, 'SNOWFLAKE_HEARTBEAT_INTERVAL_SECONDS', 0.2)
     monkeypatch.setattr(snowflake_mod, 'redis_client', redis)
-    monkeypatch.setattr(snowflake_mod, '_FIXED_NODE_RETRY_SECONDS', 0.05)
     return redis
 
 
-def test_a_fixed_node_shared_by_two_processes_is_refused_at_startup(fixed_node: FakeRedis) -> None:
+def test_a_fixed_node_shared_by_two_processes_never_hands_out_the_same_node(fixed_node: FakeRedis) -> None:
     """🔴 #401：读同一份 `.env` 的所有进程（两个 uvicorn worker + celery worker）原来共用一个固定节点号，必然撞号。
-    现在固定节点也要在 Redis 里占位：第二个进程启动时就拒绝，不是等到某天两条记录 ID 一样
+    现在固定节点也要在 Redis 里占位：第二个进程占不到就退回动态分配，拿到的是另一个节点
+
+    🔴 评审改过：原来第二个进程等一个 TTL 后**拒绝启动**。celery worker 里那个异常会被 `Signal.send` 吞掉，
+    worker 照常起来、写入全挂；等的 61 秒又超过 celery 的 60 秒初始化超时和 E2E 的 60 秒起服务超时。
+    这里同时钉住「不等」：两个进程都要立刻起来
     """
 
     async def scenario() -> None:
@@ -248,41 +251,45 @@ def test_a_fixed_node_shared_by_two_processes_is_refused_at_startup(fixed_node: 
         try:
             assert (first.datacenter_id, first.worker_id) == (3, 7)
             assert f'{settings.SNOWFLAKE_REDIS_PREFIX}:nodes:3:7' in fixed_node.values
-            with pytest.raises(errors.ServerError) as exc:
-                await second.init()
-            assert exc.value.msg == t('error.snowflake.fixed_node_taken', datacenter_id=3, worker_id=7)
-            assert not second._initialized
-            assert first.generate() > 0
+            started = time.monotonic()
+            await second.init()
+            assert time.monotonic() - started < 0.5, '固定节点被占时不能等租约过期'
+            try:
+                assert second._initialized
+                assert (second.datacenter_id, second.worker_id) != (3, 7)
+                assert f'{settings.SNOWFLAKE_REDIS_PREFIX}:nodes:{second.datacenter_id}:{second.worker_id}' in (
+                    fixed_node.values
+                )
+                a, b = Snowflake.parse(first.generate()), Snowflake.parse(second.generate())
+                assert (a.datacenter_id, a.worker_id) != (b.datacenter_id, b.worker_id)
+            finally:
+                await second.shutdown()
         finally:
             await first.shutdown()
         # 第一个进程退出、放掉节点之后，同一个节点号可以再用（进程重启的正常路径）
-        await second.init()
-        await second.shutdown()
+        third = Snowflake()
+        await third.init()
+        assert (third.datacenter_id, third.worker_id) == (3, 7)
+        await third.shutdown()
 
     asyncio.run(scenario())
 
 
-def test_a_fixed_node_left_by_a_killed_process_is_taken_once_the_lease_expires(
-    fixed_node: FakeRedis, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """被 SIGKILL 的进程没机会放节点：新进程等它的租约过期（最多一个 TTL）再占，不是直接起不来"""
+def test_a_fixed_node_left_by_a_killed_process_does_not_block_startup(fixed_node: FakeRedis) -> None:
+    """被 SIGKILL 的进程没机会放节点：新进程不等它的租约过期，先用动态分配的节点起来"""
     key = f'{settings.SNOWFLAKE_REDIS_PREFIX}:nodes:3:7'
     fixed_node.values[key] = 'dead-process-token'
-    calls = {'n': 0}
-    real_set = fixed_node.set
-
-    async def expiring_set(k: str, v: str, *, nx: bool, ex: int) -> bool:
-        calls['n'] += 1
-        if calls['n'] == 3:
-            fixed_node.values.pop(key, None)  # 租约到期
-        return await real_set(k, v, nx=nx, ex=ex)
-
-    monkeypatch.setattr(fixed_node, 'set', expiring_set)
 
     async def scenario() -> None:
         gen = Snowflake()
+        started = time.monotonic()
         await gen.init()
-        assert fixed_node.values[key] != 'dead-process-token'
-        await gen.shutdown()
+        try:
+            assert time.monotonic() - started < 0.5
+            assert fixed_node.values[key] == 'dead-process-token'
+            assert (gen.datacenter_id, gen.worker_id) != (3, 7)
+            assert gen.generate() > 0
+        finally:
+            await gen.shutdown()
 
     asyncio.run(scenario())

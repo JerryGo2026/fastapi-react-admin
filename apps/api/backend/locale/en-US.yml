@@ -278,7 +278,6 @@ error:
     clock_moved_backwards: 'Snowflake ID generation failed: clock moved backwards by more than {ms} ms, contact the administrator immediately'
     config_failed: Invalid snowflake configuration, please contact the administrator
     datacenter_config_failed: Invalid snowflake datacenter id, please contact the administrator
-    fixed_node_taken: 'Fixed snowflake node {datacenter_id}/{worker_id} is already held by another process. Processes reading the same .env (several uvicorn workers, the celery worker) cannot share a fixed node: remove SNOWFLAKE_DATACENTER_ID / SNOWFLAKE_WORKER_ID to use dynamic allocation, or give each process its own values'
     generation_failed: 'Snowflake ID generation failed: the generator is not initialised'
     lease_lost: 'Snowflake ID generation failed: this process no longer holds its snowflake node lease (heartbeat not renewed, or the node was taken by another process), please contact the administrator'
     no_node_available: No snowflake node available, all nodes are exhausted

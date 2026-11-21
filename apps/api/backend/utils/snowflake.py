@@ -31,9 +31,6 @@ return 0
 #: 心跳续租失败后的重试间隔（秒）。比心跳间隔短得多，好在本地租约到期前续上
 _HEARTBEAT_RETRY_SECONDS = 2
 
-#: 固定节点被占时多久再试一次（秒）。最多等一个 TTL：被 SIGKILL 的上一个进程没机会放节点，等它的租约过期
-_FIXED_NODE_RETRY_SECONDS = 1
-
 _RELEASE_NODE_LEASE = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
@@ -114,31 +111,19 @@ class SnowflakeNodeManager:
 
         raise errors.ServerError(msg=t('error.snowflake.no_node_available'))
 
-    async def claim_fixed_node(self, datacenter_id: int, worker_id: int) -> None:
-        """占住 `.env` 里配的固定节点号；别的进程正占着就拒绝启动（#401）
+    async def claim_fixed_node(self, datacenter_id: int, worker_id: int) -> bool:
+        """尝试占住 `.env` 里配的固定节点号（#401）。占上了返回 True；别的进程正占着返回 False，由调用方改走动态分配
 
         🔴 原来固定节点不进 Redis：读同一份 `.env` 的所有进程（`--workers 2` 的两个 uvicorn worker + celery worker）
         共用一个节点号，同一毫秒各发一个序号 0 的 ID 就撞了。现在和动态分配同一套租约（同一个 key 前缀，
         动态分配扫描时也会跳过它）。
 
-        占不到时最多等一个 TTL 再报错：上一个进程被 SIGKILL 的话 key 还在，等它过期是正常的重启路径；
-        一直占不到就是真有另一个活着的进程配了同一个号。
+        🔴 **占不到不拒绝启动、也不等，退回动态分配。** 评审时改的：拒绝启动对 celery worker 是静默的 ——
+        `worker_ready` 的处理器里抛的异常被 `Signal.send` 吞掉，worker 照常起来、所有带雪花主键的写入全挂；
+        等租约过期（最多一个 TTL = 60 秒）又会撑爆 celery 的 60 秒初始化超时和 E2E 的 60 秒起服务超时。
+        退回动态分配的节点同样在 Redis 里占着，ID 照样唯一；被 SIGKILL 的上一个进程留下的 key 也不用等。
         """
-        deadline = time.monotonic() + settings.SNOWFLAKE_NODE_TTL_SECONDS + _FIXED_NODE_RETRY_SECONDS
-        warned = False
-        while not await self._register(datacenter_id, worker_id):
-            if time.monotonic() >= deadline:
-                log.error(f'雪花算法固定节点 {datacenter_id}/{worker_id} 已被其他进程占用，拒绝启动')
-                raise errors.ServerError(
-                    msg=t('error.snowflake.fixed_node_taken', datacenter_id=datacenter_id, worker_id=worker_id)
-                )
-            if not warned:
-                log.warning(
-                    f'雪花算法固定节点 {datacenter_id}/{worker_id} 正被占用，'
-                    f'最多等 {settings.SNOWFLAKE_NODE_TTL_SECONDS} 秒（上一个进程的租约过期）'
-                )
-                warned = True
-            await asyncio.sleep(_FIXED_NODE_RETRY_SECONDS)
+        return await self._register(datacenter_id, worker_id)
 
     async def _register(self, datacenter_id: int, worker_id: int) -> bool:
         key = f'{self.node_redis_prefix}:{datacenter_id}:{worker_id}'
@@ -223,6 +208,7 @@ class Snowflake:
         self._node_manager: SnowflakeNodeManager | None = None
         self._auto_allocated = False  # 标记是否由 Redis 自动分配 ID（固定节点也在 Redis 里占租约，见 init）
         self._clock_behind = False  # 正处在时钟回拨里（只在进入时告警一次）
+        self._wall_high = -1  # 见过的最大系统时钟。判「回拨」只拿它比，不拿 last_timestamp（那里面含借出去的毫秒）
 
     async def init(self, redis: RedisCli | None = None) -> None:
         """初始化雪花算法
@@ -247,9 +233,15 @@ class Snowflake:
                 if not (0 <= worker_id <= SnowflakeConfig.MAX_WORKER_ID):
                     log.error(f'雪花算法 worker_id 配置失败，必须在 0~{SnowflakeConfig.MAX_WORKER_ID} 之间')
                     raise errors.ServerError(msg=t('error.snowflake.worker_config_failed'))
-                await manager.claim_fixed_node(datacenter_id, worker_id)
-                log.debug(f'雪花算法使用环境变量固定节点：datacenter_id={datacenter_id}, worker_id={worker_id}')
-            else:
+                if await manager.claim_fixed_node(datacenter_id, worker_id):
+                    log.debug(f'雪花算法使用环境变量固定节点：datacenter_id={datacenter_id}, worker_id={worker_id}')
+                else:
+                    log.warning(
+                        f'雪花算法固定节点 {datacenter_id}/{worker_id} 正被其他进程占用（读同一份 .env 的多个进程、'
+                        f'或刚被杀掉的上一个进程），改用 Redis 动态分配'
+                    )
+                    fixed = False
+            if not fixed:
                 # Redis 动态分配
                 datacenter_id, worker_id = await manager.acquire_node_id()
                 self._auto_allocated = True
@@ -293,9 +285,13 @@ class Snowflake:
             behind = self.last_timestamp - now
             if behind > SnowflakeConfig.CLOCK_BACKWARD_TOLERANCE_MS:
                 raise errors.ServerError(msg=t('error.snowflake.clock_moved_backwards', ms=behind))
-            if behind > 0 and not self._clock_behind:
-                log.warning(f'检测到时钟回拨 {behind} ms，沿用上一个时间戳继续发号')
-            self._clock_behind = behind > 0
+            # ⚠️ 只有系统时钟真的往回走了才告警：同一毫秒序号用满借了下一毫秒之后，`now` 也落后于 last_timestamp，
+            # 拿 `behind` 判会在每次突发写入时误报一条「时钟回拨 1 ms」（评审发现）
+            rolled_back = now < self._wall_high
+            if rolled_back and not self._clock_behind:
+                log.warning(f'检测到时钟回拨 {self._wall_high - now} ms，沿用上一个时间戳继续发号')
+            self._clock_behind = rolled_back
+            self._wall_high = max(self._wall_high, now)
 
             if now > self.last_timestamp:
                 timestamp = now

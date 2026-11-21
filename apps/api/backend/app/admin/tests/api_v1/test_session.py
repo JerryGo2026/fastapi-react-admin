@@ -10,6 +10,7 @@
 在它身上测「挤人 / 停用 / 改密码」会把别的用例的会话一起带走。
 """
 
+import asyncio
 import secrets
 import time
 
@@ -545,3 +546,53 @@ def test_startup_gives_leftover_presence_keys_a_ttl(client: TestClient) -> None:
         assert client.portal.call(redis_client.exists, prefix) == 0
     finally:
         client.portal.call(redis_client.delete, leftover)
+
+
+def test_a_connect_that_fails_to_mark_presence_is_not_kept_alive_by_the_heartbeat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 评审发现：`connect` 先把 sid 记进本进程的连接表、再写 Redis。写 Redis 抛了（超时 / 抖动）→ 握手被拒，
+    socketio 不会为它调 `disconnect` → 那个 sid 永远留在连接表里，心跳每 30 秒把它写回 Redis ——
+    正是要消灭的「永久在线」。写成功之后才记进连接表"""
+    from backend.common.socketio import server
+
+    socket_id = f'pytest-{secrets.token_hex(4)}'
+
+    async def broken_mark(*_: object) -> None:
+        await asyncio.sleep(0)
+        raise ConnectionError('Redis timeout')
+
+    monkeypatch.setattr(server, '_mark_online', broken_mark)
+    with pytest.raises(ConnectionError):
+        client.portal.call(
+            server.connect, socket_id, {}, {'token': settings.WS_NO_AUTH_MARKER, 'session_uuid': 'pytest-ghost'}
+        )
+    assert socket_id not in server._local_sids
+
+
+def test_the_heartbeat_does_not_resurrect_a_socket_that_disconnected_mid_sweep(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, account: int
+) -> None:
+    """心跳遍历的是连接表的快照、每个 sid 一次 await：遍历途中断开的连接，不能被后面那次续期写回来"""
+    from backend.common.socketio import server
+
+    prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
+    a = _login(client)
+    first = _connect(client, a)
+    second = _connect(client, a)
+    real_mark = server._mark_online
+
+    async def mark_then_disconnect_the_other(sid: str, session_uuid: str) -> None:
+        await real_mark(sid, session_uuid)
+        if sid == first:
+            await server.disconnect(second)  # 心跳正 await 第一个 sid 的时候，第二条连接断开
+
+    try:
+        monkeypatch.setattr(server, '_mark_online', mark_then_disconnect_the_other)
+        client.portal.call(server.refresh_presence)
+        monkeypatch.setattr(server, '_mark_online', real_mark)
+        assert client.portal.call(redis_client.exists, f'{prefix}:sid:{second}') == 0
+    finally:
+        monkeypatch.setattr(server, '_mark_online', real_mark)
+        client.portal.call(server.disconnect, first)
+        client.portal.call(server.disconnect, second)
