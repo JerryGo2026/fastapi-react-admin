@@ -1,5 +1,4 @@
 from typing import Annotated
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi_oauth20 import FastAPIOAuth20, GoogleOAuth20
@@ -18,6 +17,7 @@ from backend.plugin.oauth2.state_binding import (
     authorize_url,
     callback_failed,
     clear_state_cookie,
+    login_redirect_url,
     profile_security_url,
     require_state_cookie,
 )
@@ -83,8 +83,7 @@ async def google_oauth2_callback(  # ruff:ignore[missing-return-type-undocumente
     # 二次验证（#181）：没开会话，把一次性令牌带回登录页接着做第二步。令牌 5 分钟、最多试 5 次、
     # 不配动态码用不了 —— 和 refresh token 不是一个量级，才能进 URL（那个不行，见下）
     if isinstance(data, MfaChallenge):
-        query = urlencode({'mfa': data.mfa_token, 'setup': '1' if data.mfa_setup else '0'})
-        redirect = RedirectResponse(url=f'{settings.OAUTH2_FRONTEND_LOGIN_REDIRECT_URI}?{query}')
+        redirect = RedirectResponse(url=login_redirect_url(mfa=data.mfa_token, setup='1' if data.mfa_setup else '0'))
         clear_state_cookie(redirect, request)
         return redirect
 

@@ -132,8 +132,7 @@ async def callback_failed(request: Request, db: AsyncSession, exc: errors.BaseEx
     看到的就是正常返回、照样 commit —— 抛错之前写了一半的东西会被提交
     """
     await db.rollback()
-    query = urlencode({'error': exc.msg or ''})
-    redirect = RedirectResponse(url=f'{settings.OAUTH2_FRONTEND_LOGIN_REDIRECT_URI}?{query}')
+    redirect = RedirectResponse(url=login_redirect_url(error=exc.msg or ''))
     clear_state_cookie(redirect, request)
     return redirect
 
@@ -149,6 +148,15 @@ def profile_security_url() -> str:
     hash 路由（`#/profile`）的参数在 hash 里
     """
     return _with_query(settings.OAUTH2_FRONTEND_BINDING_REDIRECT_URI, section='security')
+
+
+def login_redirect_url(**params: str) -> str:
+    """回前端登录落地页（失败原因 / MFA 第二步）：同 `profile_security_url`，解析后设参数（#438 评审）
+
+    原来是 `f'{LOGIN_REDIRECT_URI}?{query}'`：配置里带着 `?from=sso` 时拼成 `?from=sso?error=...`，
+    前端读不到 `error` / `mfa`（MFA 令牌丢了、第二步接不下去）；带 `#` 时参数跑进 hash
+    """
+    return _with_query(settings.OAUTH2_FRONTEND_LOGIN_REDIRECT_URI, **params)
 
 
 def _with_query(url: str, **params: str) -> str:

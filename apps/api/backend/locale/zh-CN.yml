@@ -374,6 +374,7 @@ error:
     not_found: 用户不存在
     password_mismatch: 两次密码输入不一致
     password_set_requires_reauth: 这个账号还没有密码。第一次设置密码前，请先在个人中心「安全」里用已绑定的第三方账号重新验证身份（10 分钟内有效）
+    password_set_in_progress: 正在设置密码（这个会话的另一个请求还没处理完），请稍后再试
     password_required: 密码不允许为空
     permission_type_not_found: 权限类型不存在
     preference_too_many: '个人偏好最多存 {limit} 项'

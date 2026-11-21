@@ -12,13 +12,19 @@ access token（30 分钟）就能给他设一个长期有效的密码」。
 🔴 **写库成功之后才消费，并发照样只能用一次**（#437）。原来 `update_password` 在写库**之前** `GETDEL`：
 之后写库 / 提交失败，凭据已经没了，用户只能重跑一遍第三方授权。现在分三步：
 
-1. `claim`：另一把 key 上 `SET NX EX`（`CLAIM_SECONDS`）占住 —— 两个并发请求只有一个占得到，凭据本身不动
+1. `claim`：另一把 key 上 `SET NX` 占住 —— 两个并发请求只有一个占得到，凭据本身不动。
+   占位的寿命 = 凭据的剩余寿命（同一段 Lua 里读 `PTTL` 再 `SET NX PX`，原子）
 2. 写库。service 里抛错 → `release`（比对 token 再删占位）；**提交**那一步失败 service 看不到，
    靠 `release_on_rollback` 挂在会话最外层回滚上的钩子还回去
-3. 提交成功之后（后台任务）`finish`：凭据和占位一起删
+3. 提交成功之后（后台任务）`finish`：凭据和占位一起删；它失败只记日志，**不能抛**
 
-占位没还回去（回写本身失败）也只卡 `CLAIM_SECONDS`，凭据还在、过了就能再设。
-提交成功之后 `sys_user.password` 已经不是 NULL，凭据那条分支根本走不到 —— `finish` 万一没跑成，也不会被用第二次。
+🔴 **占位不能比凭据先过期**（#438 评审）。原来占位固定 30 秒：一次写库卡过 30 秒（行锁等待），
+同一会话的第二个请求就能再占一次、两次都写进去 —— 原来的 `GETDEL` 不管写多久都只给一次。跟着凭据走之后，
+占位没还回去（回写本身失败）最坏卡到凭据过期（≤ `TTL_SECONDS`），那时本来也要重新授权。
+
+🔴 **`finish` 不能抛**：Starlette 的后台任务按顺序跑、一个抛了后面的全不跑，而它排在「撤全部会话」
+（`_revoke_after_commit`）前面 —— Redis 抖一下，偷来 token 的那个会话就活过了改密码。
+提交成功之后 `sys_user.password` 已经不是 NULL，凭据那条分支根本走不到 —— `finish` 没跑成也不会被用第二次。
 
 🔴 **凭据记在「发起重新授权的那个会话」上，不是记在用户上**（#402 评审）。按用户记的话，
 拿着偷来 token 的另一个会话轮询 `password-status`，一看到本人刚验证完就抢先设一个只有自己知道的密码 ——
@@ -45,11 +51,24 @@ from backend.common.log import log
 from backend.database.redis import redis_client
 
 TTL_SECONDS = 600
-#: 写库占位的租期：只要盖过一次改密请求（含提交），回写失败时最多卡这么久
-CLAIM_SECONDS = 30
 _PREFIX = 'fba:user:password_set_grant'
 _CLAIM_PREFIX = 'fba:user:password_set_claim'
 
+# 凭据还在、没被占 → 占住，寿命跟凭据剩下的一样长（不会比凭据先过期，见模块说明）。
+# 返回 1 占到 / 0 凭据不在 / -1 被别的请求占着
+_CLAIM = """
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl == -2 then
+    return 0
+end
+if ttl < 0 then
+    ttl = tonumber(ARGV[2])
+end
+if redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', ttl) then
+    return 1
+end
+return -1
+"""
 # 比对 token 再删占位：租期过了被别人重新占住时，不能把别人的删掉
 _RELEASE = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -58,6 +77,10 @@ end
 return 0
 """
 _background: set[asyncio.Task[None]] = set()
+
+
+class PasswordSetBusy(Exception):  # ruff: ignore[error-suffix-on-exception-name]
+    """凭据还在，但同一会话的另一个请求正在用它写库（双击保存）—— 不是「要重新验证」"""
 
 
 def _key(user_id: int, session_uuid: str) -> str:
@@ -79,15 +102,17 @@ async def is_granted(user_id: int, session_uuid: str) -> bool:
 
 
 async def claim(user_id: int, session_uuid: str) -> str | None:
-    """写库之前占住凭据：两个并发请求只有一个拿得到 token；凭据不在 / 已被占 → None"""
+    """写库之前占住凭据：两个并发请求只有一个拿得到 token。
+
+    凭据不在 → None；凭据在但被同一会话的另一个请求占着 → `PasswordSetBusy`
+    """
     token = uuid4().hex
-    if not await redis_client.set(_claim_key(user_id, session_uuid), token, nx=True, ex=CLAIM_SECONDS):
-        return None
-    # 先占再看：别的请求刚 `finish` 完（凭据已删、占位也删了）时，这里占得到但凭据已经没了
-    if not await redis_client.exists(_key(user_id, session_uuid)):
-        await release(user_id, session_uuid, token)
-        return None
-    return token
+    result = await redis_client.eval(
+        _CLAIM, 2, _key(user_id, session_uuid), _claim_key(user_id, session_uuid), token, TTL_SECONDS * 1000
+    )
+    if int(result) == -1:
+        raise PasswordSetBusy
+    return token if int(result) == 1 else None
 
 
 async def release(user_id: int, session_uuid: str, token: str) -> None:
@@ -96,18 +121,26 @@ async def release(user_id: int, session_uuid: str, token: str) -> None:
 
 
 async def finish(user_id: int, session_uuid: str) -> None:
-    """提交成功之后：凭据和占位一起删"""
-    await redis_client.delete(_key(user_id, session_uuid), _claim_key(user_id, session_uuid))
+    """提交成功之后：凭据和占位一起删。🔴 不能抛 —— 后面排着「撤全部会话」的后台任务（见模块说明）"""
+    try:
+        await redis_client.delete(_key(user_id, session_uuid), _claim_key(user_id, session_uuid))
+    except Exception as e:
+        # 密码已经设上了，凭据那条分支走不到；剩下的凭据 / 占位自己过期
+        log.warning(f'设密凭据收尾删除失败（{TTL_SECONDS}s 内自动过期）：{e}')
 
 
 @asynccontextmanager
 async def held(
     db: AsyncSession, background_tasks: BackgroundTasks, *, user_id: int, session_uuid: str
 ) -> AsyncIterator[None]:
-    """包住「写密码」那几句：进来时占凭据（占不到 → 要求重新验证），里面抛错 → 放开占位，
-    提交失败 → 回滚钩子放开，提交成功 → 后台任务删凭据（`CurrentSessionTransaction` 先提交、后台任务后跑、回滚不跑）
+    """包住「写密码」那几句：进来时占凭据（凭据没了 → 要求重新验证；被同会话另一个请求占着 → 稍后再试），
+    里面抛错 → 放开占位，提交失败 → 回滚钩子放开，
+    提交成功 → 后台任务删凭据（`CurrentSessionTransaction` 先提交、后台任务后跑、回滚不跑）
     """
-    token = await claim(user_id, session_uuid)
+    try:
+        token = await claim(user_id, session_uuid)
+    except PasswordSetBusy:
+        raise errors.RequestError(msg=t('error.user.password_set_in_progress'))
     if token is None:
         raise errors.RequestError(msg=t('error.user.password_set_requires_reauth'))
     release_on_rollback(db, user_id, session_uuid, token)
@@ -116,7 +149,8 @@ async def held(
         # 库的报错尽量在这里冒出来，交给下面同步放开（提交那一步的失败靠回滚钩子）
         await db.flush()
     except BaseException:
-        await release(user_id, session_uuid, token)
+        # 放开失败不能盖掉写库那个错（报给用户 / 进日志的要是它）；没放开的占位由回滚钩子再试一次
+        await _release_quietly(user_id, session_uuid, token)
         raise
     background_tasks.add_task(finish, user_id, session_uuid)
 
@@ -149,5 +183,5 @@ def release_on_rollback(db: AsyncSession, user_id: int, session_uuid: str, token
 async def _release_quietly(user_id: int, session_uuid: str, token: str) -> None:
     try:
         await release(user_id, session_uuid, token)
-    except Exception as e:  # 派出去的协程没人等，异常要自己落日志；最坏卡 CLAIM_SECONDS
-        log.warning(f'设密凭据占位回写失败（{CLAIM_SECONDS}s 后自动放开）：{e}')
+    except Exception as e:  # 没人接这个异常，要自己落日志；最坏卡到凭据过期
+        log.warning(f'设密凭据占位回写失败（随凭据在 {TTL_SECONDS}s 内过期）：{e}')

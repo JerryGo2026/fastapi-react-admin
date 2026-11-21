@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { createRequire } from "node:module"
+import os from "node:os"
 import path from "node:path"
 import { test } from "node:test"
 import vm from "node:vm"
@@ -36,7 +38,7 @@ const contract = load(path.resolve(import.meta.dirname, "../../../packages/platf
   IPC: Record<string, string>
 }
 
-function setup() {
+function setup(opts: { install?: (emit: (event: string, arg?: unknown) => void) => void } = {}) {
   const config = { updateUrl: "", autoLaunch: false }
   const feedsAtCheck: string[] = []
   const listeners: Record<string, Array<(arg?: unknown) => void>> = {}
@@ -54,12 +56,19 @@ function setup() {
     on(event: string, fn: (arg?: unknown) => void) {
       ;(listeners[event] ??= []).push(fn)
     },
+    removeListener(event: string, fn: (arg?: unknown) => void) {
+      listeners[event] = (listeners[event] ?? []).filter((f) => f !== fn)
+    },
     checkForUpdates: async () => {
       feedsAtCheck.push(feed)
       return null
     },
-    quitAndInstall: (...args: unknown[]) => installs.push(args),
+    quitAndInstall: (...args: unknown[]) => {
+      installs.push(args)
+      opts.install?.(emitUpdater)
+    },
   }
+  const emitUpdater = (event: string, arg?: unknown) => listeners[event]?.forEach((fn) => fn(arg))
   const updater = load(path.resolve(import.meta.dirname, "../src/main/updater.ts"), {
     electron: { app: { isPackaged: true } },
     "electron-updater": { autoUpdater },
@@ -75,7 +84,8 @@ function setup() {
     feedsAtCheck,
     installs,
     updater,
-    emitUpdater: (event: string, arg?: unknown) => listeners[event]?.forEach((fn) => fn(arg)),
+    emitUpdater,
+    listeners,
   }
 }
 
@@ -112,6 +122,17 @@ test("quitAndInstall 静默安装并拉回（true, true）", async () => {
   assert.deepEqual(s.installs, [[true, true]])
 })
 
+test("🔴 electron-updater 装不上时只发 error 事件、不抛：quitAndInstall 要据此 reject（#438 评审）", async () => {
+  // BaseUpdater.install：安装包被清掉 / doInstall 抛错 → dispatchError(...) 后 return false，quitAndInstall 正常返回
+  const s = setup({ install: (emit) => emit("error", new Error("No update filepath provided, can't quit and install")) })
+  await s.updater.checkForUpdates(() => {})
+  await assert.rejects(s.updater.quitAndInstall(), /No update filepath provided/)
+  // 临时挂的监听要摘掉，不然每点一次多一个
+  const before = s.listeners.error?.length ?? 0
+  await assert.rejects(s.updater.quitAndInstall())
+  assert.equal(s.listeners.error?.length ?? 0, before)
+})
+
 test("IPC：updater:downloaded 返回主进程记着的版本（渲染层挂载时补问一次）", async () => {
   const handlers: Record<string, (...args: unknown[]) => unknown> = {}
   const { registerIpc } = load(path.resolve(import.meta.dirname, "../src/main/ipc.ts"), {
@@ -136,4 +157,34 @@ test("IPC：updater:downloaded 返回主进程记着的版本（渲染层挂载�
   const channel = contract.IPC.updaterDownloaded
   assert.ok(channel, "契约里没有 updater:downloaded 这条通道")
   assert.equal(await handlers[channel]?.(), "9.9.9")
+})
+
+test("🔴 真 electron-updater：`updateConfigPath = null` 丢掉 setFeedURL 的覆盖、改读 app-update.yml（#438 评审）", async () => {
+  /*
+   * 上面的 mock 只证明 updater.ts 「设了这个属性」；这个 setter 在 d.ts 里标着 test only，
+   * 升级 electron-updater 时它的语义一变，清空 updateUrl 就又要重启才回落 —— 这条拿真的 AppUpdater 守着。
+   */
+  const require = createRequire(import.meta.url)
+  const { AppUpdater } = require("electron-updater/out/AppUpdater") as {
+    AppUpdater: new (options: null, app: unknown) => {
+      _logger: unknown
+      clientPromise: Promise<{ baseUrl: URL }> | null
+      configOnDisk: { value: Promise<{ url: string }> }
+      setFeedURL(opts: { provider: string; url: string }): void
+      updateConfigPath: string | null
+    }
+  }
+  const dir = mkdtempSync(path.join(os.tmpdir(), "fra-updater-"))
+  const yml = path.join(dir, "app-update.yml")
+  writeFileSync(yml, "provider: generic\nurl: https://default.example/desktop\n")
+  const app = { version: "1.0.0", appUpdateConfigPath: yml, userDataPath: dir, baseCachePath: dir, name: "t", isPackaged: true, whenReady: async () => {}, onQuit() {}, quit() {} }
+  const updater = new AppUpdater(null, app)
+  updater._logger = { info() {}, warn() {}, error() {}, debug() {} }
+
+  updater.setFeedURL({ provider: "generic", url: "https://intranet.example/desktop" })
+  assert.match(String((await updater.clientPromise)?.baseUrl), /intranet\.example/, "前置：setFeedURL 覆盖成内网源")
+
+  updater.updateConfigPath = null
+  assert.equal(updater.clientPromise, null, "setter 没清掉 clientPromise：下次检查还用内网源")
+  assert.equal((await updater.configOnDisk.value).url, "https://default.example/desktop")
 })

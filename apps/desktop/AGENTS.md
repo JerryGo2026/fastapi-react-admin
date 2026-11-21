@@ -419,3 +419,16 @@ false 分支什么都不做；另外 Electron 的 `setLoginItemSettings` 在 **L
 修之前 3 条红（清空后第三次检查的源仍是内网地址 · `downloadedVersion` 不存在 · 契约里没有 `updater:downloaded`），修后桌面端 30 条全绿。
 platform `shell/desktop-update.test.ts` 4 条；变异 —— 去掉挂上时补问 →「事件早就发过了」那条红；吞掉 `quitAndInstall` 的失败 →「重启失败要说出来」那条红。
 **没实测**：真 Electron / 打包产物里点「重启更新」、真 electron-updater 上 `updateConfigPath = null` 之后的那次检查（只读了源码）、toast 的样子（没开浏览器看）。
+
+**评审跟进（#438）**：
+
+- 🔴 **electron-updater 装不上时不抛**：`BaseUpdater.install` 遇到安装包没了（缓存被清 / 杀软删了）或 `doInstall` 抛错，
+  只同步 `dispatchError(...)` 再 `return false`，`quitAndInstall` 正常返回 —— IPC resolve、提示已关、应用照旧跑旧版，什么都不说。
+  `quitAndInstall()` 在调用期间临时挂一个 `error` 监听，接到就 reject（渲染层弹「重启更新失败」+ 重试）。
+  ⚠️ `quitAndInstallCalled` 已置位的那一支只打 warn、不发事件，接不住；那时安装器已经在跑、应用正在退出
+- `updateConfigPath = null` 有了真 electron-updater 的守卫：`tests/updater.test.ts` 最后一条 `new AppUpdater(null, 假 app)`，
+  `setFeedURL` 之后置空，断言 `clientPromise` 被清、`configOnDisk` 读回 `app-update.yml`。升级后这条红 = setter 语义变了
+- 没改的：`downloaded` 在 `update-not-available` 之后不清 —— electron-updater 自己也不清已下载的包，`autoInstallOnAppQuit`
+  退出时照样装它，提示和实际行为一致；主进程抛出的「更新器不可用」是中文 —— 主进程报给人看的错误一直是中文（同 auth）
+
+**实测证据**：`tests/updater.test.ts` 新增 2 条；「只发 error 不抛」那条在修之前红（`Missing expected rejection`）。真 AppUpdater 那条是守卫，修前修后都绿。

@@ -184,5 +184,20 @@ export async function quitAndInstall(): Promise<void> {
    */
   // 拿不到更新器就抛：渲染层「重启更新」按钮据此显示失败（硬纪律 9），而不是点了没反应
   if (!updater) throw new Error("更新器不可用（开发模式或包里没有 app-update.yml）")
-  updater.quitAndInstall(true, true)
+  /*
+   * 🔴 装不上时 electron-updater **不抛**（#438 评审）：`BaseUpdater.install` 发现安装包没了（缓存被清 / 杀软删了）
+   * 或 `doInstall` 抛错，都只是同步 `dispatchError(...)` 然后 `return false`，`quitAndInstall` 正常返回 ——
+   * IPC resolve，渲染层以为成功、提示已经关掉，应用照旧跑旧版。所以在调用期间临时接住同步发出的 `error`
+   */
+  let failure: unknown = null
+  const onError = (e: unknown) => {
+    failure ??= e
+  }
+  updater.on("error", onError)
+  try {
+    updater.quitAndInstall(true, true)
+  } finally {
+    updater.removeListener("error", onError)
+  }
+  if (failure) throw failure instanceof Error ? failure : new Error(String(failure))
 }

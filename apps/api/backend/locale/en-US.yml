@@ -373,6 +373,7 @@ error:
     not_found: User does not exist
     password_mismatch: The two passwords do not match
     password_set_requires_reauth: This account has no password yet. Before setting the first one, re-verify with a linked third-party account under Profile > Security (valid for 10 minutes)
+    password_set_in_progress: The password is being set by another request from this session. Try again in a moment
     password_required: Password cannot be empty
     permission_type_not_found: Permission type does not exist
     preference_too_many: 'You can store at most {limit} personal preferences'
