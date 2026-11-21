@@ -260,3 +260,16 @@ AI 工具的参数报错也走它。顺带：dev 下 422 文案回显的输入�
 修之前 5 条红（保存点释放就派发 · 外层回滚后照发 · 保存点回滚丢掉外层的 · 同 key 被带走 · 嵌套保存点回滚后内层的照发），
 普通提交 / 回滚那条本来就绿。`plugin/dict/tests/test_dict_cache_after_commit.py`：在第一次清和提交之间往字典命名空间写一个旧值
 （模拟并发读写回），修之前请求结束后旧值还在，修之后被提交后那次清掉。
+
+## 🔴 被冗余存储的键改了：副本跟改，缓存按旧键清（字典类型，#395）
+
+**症状**：字典类型把编码从 A 改成 B（HTTP 200）之后，`/dict-datas/type-codes/B` 是 404，`/type-codes/A` 照旧从缓存返回两小时；
+再建一个复用 A 的新类型，它凭空带着那批数据项。删类型也一样：数据项跟着软删了，下拉继续返回已删的选项。
+**根因**：`sys_dict_data.type_code` 是类型编码的冗余副本，缓存键又是 `type:{code}` —— 改编码时两样都没人动；
+`dict_type_service` 的 `update` / `delete` 原来没挂 `@cache_invalidate`（只有字典**数据**的增删改挂了）。
+**修法**：改编码时 `dict_data_dao.update_type_code` 按 `type_id` 改副本；`update` / `delete` 挂 `@cache_invalidate` 清整个
+`CACHE_DICT_REDIS_PREFIX` 命名空间 —— 和字典数据同一条路，#426 给装饰器加的「提交之后再清一次」合进来后也就覆盖到这两处。
+⚠️ 「编码变没变」要在 `dict_type_dao.update` **之前**抓成局部变量：同一个 ORM 实例更新完读到的已经是新编码
+（[`apps/api` 分册](../../AGENTS.md)「改完再读同一个 ORM 实例」）。第一版就是写在更新之后，副本一行都没改。
+**实测证据**（2026-11-21，PostgreSQL / Redis 私有库）：`plugin/dict/tests/test_dict_type_sync.py` 3 条，修前全红（新编码 404 ·
+复用旧编码的新类型返回旧项 · 删类型后旧选项照样 200）；挂了装饰器、但判断写在更新之后时，改编码那两条仍红（新编码 404）。
