@@ -78,6 +78,52 @@ def test_a_read_between_invalidation_and_commit_does_not_pin_the_old_value(
     assert not client.portal.call(redis_client.exists, STALE), '提交之后没再清：空档里写回的旧值留到 TTL'
 
 
+@pytest.mark.parametrize('action', ['update', 'delete'])
+def test_dict_type_writes_also_clear_after_commit(
+    client: TestClient, token_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """#395 给字典**类型**的 update / delete 挂了 `@cache_invalidate`：它们要同样吃到提交后那次清理"""
+    code = f'ca{_RUN}'
+    assert client.post(TYPES, headers=token_headers, json={'name': f'缓存{_RUN}', 'code': code}).json()['code'] == 200
+    type_id = client.get(TYPES, headers=token_headers, params={'code': code}).json()['data']['items'][0]['id']
+
+    committed = False
+    calls: list[bool] = []
+    real = decorator.invalidate_cache
+
+    async def racing_invalidate(key: str, *, prefix: bool) -> None:
+        await real(key, prefix=prefix)
+        calls.append(committed)
+        if not committed:
+            await redis_client.set(STALE, 'old', ex=600)
+
+    def on_commit(_session: Session) -> None:
+        nonlocal committed
+        committed = True
+
+    monkeypatch.setattr(decorator, 'invalidate_cache', racing_invalidate)
+    event.listen(Session, 'after_commit', on_commit)
+    try:
+        if action == 'update':
+            body = {'name': f'缓存改{_RUN}', 'code': code}
+            response = client.put(f'{TYPES}/{type_id}', headers=token_headers, json=body)
+        else:
+            response = client.request('DELETE', TYPES, headers=token_headers, json={'pks': [type_id]})
+        assert response.json()['code'] == 200, response.text
+
+        async def settle() -> None:
+            if after_commit._background:
+                await asyncio.gather(*list(after_commit._background))
+
+        client.portal.call(settle)
+    finally:
+        event.remove(Session, 'after_commit', on_commit)
+
+    assert calls and calls[0] is False, '前提：第一次清发生在提交之前'
+    assert True in calls, '提交之后没有再清一次'
+    assert not client.portal.call(redis_client.exists, STALE), '提交之后没再清：空档里写回的旧值留到 TTL'
+
+
 def test_atomic_false_still_swallows_a_key_builder_error_when_a_session_is_passed() -> None:
     """`atomic=False` 的契约是「清不掉只记日志」。提交后那次登记要用 `invalidate_key`，
     key 都没算出来时不能再去读它（原来是 UnboundLocalError → 500，业务写入跟着回滚）"""
