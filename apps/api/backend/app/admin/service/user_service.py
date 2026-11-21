@@ -469,20 +469,25 @@ class UserService:
         return count
 
     @staticmethod
-    async def get_password_status(*, db: AsyncSession, user_id: int) -> dict[str, bool]:
-        """有没有密码 + 第一次设密码前的第三方重新授权完成了没有"""
+    async def get_password_status(*, db: AsyncSession, user_id: int, session_uuid: str) -> dict[str, bool]:
+        """有没有密码 + 这个会话第一次设密码前的第三方重新授权完成了没有"""
         with bypass_data_scope():  # 读自己那一行，理由同 `update_password`
             user = await user_dao.get(db, user_id)
         if not user:
             raise errors.NotFoundError(msg=t('error.user.not_found'))
         return {
             'has_password': bool(user.password),
-            'reauth_verified': not user.password and await password_set_grant.is_granted(user_id),
+            'reauth_verified': not user.password and await password_set_grant.is_granted(user_id, session_uuid),
         }
 
     @staticmethod
     async def update_password(
-        *, db: AsyncSession, background_tasks: BackgroundTasks, user_id: int, obj: ResetPasswordParam
+        *,
+        db: AsyncSession,
+        background_tasks: BackgroundTasks,
+        user_id: int,
+        session_uuid: str,
+        obj: ResetPasswordParam,
     ) -> int:
         """
         更新当前用户密码
@@ -490,6 +495,7 @@ class UserService:
         :param db: 数据库会话
         :param background_tasks: 提交成功后清理用户快照
         :param user_id: 用户 ID
+        :param session_uuid: 发请求的会话（无密码账号第一次设密码时，只认这个会话自己做过的重新授权）
         :param obj: 密码重置参数
         :return:
         """
@@ -515,7 +521,7 @@ class UserService:
         # 确认身份（`password_set_grant`），凭据在下面真正写入之前才消费
         if user.password and not (obj.old_password and password_verify(obj.old_password, user.password)):
             raise errors.RequestError(msg=t('error.user.wrong_old_password'))
-        if not user.password and not await password_set_grant.is_granted(user_id):
+        if not user.password and not await password_set_grant.is_granted(user_id, session_uuid):
             raise errors.RequestError(msg=t('error.user.password_set_requires_reauth'))
 
         if obj.new_password != obj.confirm_password:
@@ -523,7 +529,7 @@ class UserService:
 
         await validate_new_password(db, user_id, obj.new_password)
         # 复杂度等校验都过了才消费（被拒不用重跑一遍第三方授权）；GETDEL 原子，并发只有一个拿得到
-        if not user.password and not await password_set_grant.consume(user_id):
+        if not user.password and not await password_set_grant.consume(user_id, session_uuid):
             raise errors.RequestError(msg=t('error.user.password_set_requires_reauth'))
         # 旧 hash 要在改之前抓住 —— 理由同 `reset_password`（同一个 ORM 实例）
         previous_password = user.password

@@ -9,6 +9,10 @@ access token（30 分钟）就能给他设一个长期有效的密码」。
 `GET /oauth2/me/reauth`）。回调确认授权回来的第三方账号就是绑在这个人名下的那一个，才在这里记一笔，
 有效期 `TTL_SECONDS`，`update_password` 用 `GETDEL` 原子消费 —— 只能设一次。
 
+🔴 **凭据记在「发起重新授权的那个会话」上，不是记在用户上**（#402 评审）。按用户记的话，
+拿着偷来 token 的另一个会话轮询 `password-status`，一看到本人刚验证完就抢先设一个只有自己知道的密码 ——
+本人那次验证反倒替攻击者开了门。会话 ID 来自 access token（`jwt_decode(...).session_uuid`）。
+
 放在 admin 而不是 oauth2 插件里：消费方是 admin 的 `user_service`，admin 不能反过来 import 插件。
 插件停用时没有人能写入凭据，无密码账号自助设不了密码，只能找超管重置（超管重置不需要这一步）。
 """
@@ -19,20 +23,20 @@ TTL_SECONDS = 600
 _PREFIX = 'fba:user:password_set_grant'
 
 
-def _key(user_id: int) -> str:
-    return f'{_PREFIX}:{user_id}'
+def _key(user_id: int, session_uuid: str) -> str:
+    return f'{_PREFIX}:{user_id}:{session_uuid}'
 
 
-async def grant(user_id: int) -> None:
-    """第三方重新授权成功：记一笔，`TTL_SECONDS` 内有效"""
-    await redis_client.set(_key(user_id), '1', ex=TTL_SECONDS)
+async def grant(user_id: int, session_uuid: str) -> None:
+    """第三方重新授权成功：给发起的那个会话记一笔，`TTL_SECONDS` 内有效"""
+    await redis_client.set(_key(user_id, session_uuid), '1', ex=TTL_SECONDS)
 
 
-async def is_granted(user_id: int) -> bool:
-    """给个人中心看「验证过了没有」，不消费"""
-    return bool(await redis_client.exists(_key(user_id)))
+async def is_granted(user_id: int, session_uuid: str) -> bool:
+    """给个人中心看「这个会话验证过了没有」，不消费"""
+    return bool(await redis_client.exists(_key(user_id, session_uuid)))
 
 
-async def consume(user_id: int) -> bool:
+async def consume(user_id: int, session_uuid: str) -> bool:
     """原子消费：两个并发请求只有一个拿得到"""
-    return bool(await redis_client.getdel(_key(user_id)))
+    return bool(await redis_client.getdel(_key(user_id, session_uuid)))

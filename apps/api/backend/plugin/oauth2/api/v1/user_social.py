@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request
 
 from backend.common.response.response_schema import ResponseModel, ResponseSchemaModel, response_base
-from backend.common.security.jwt import DependsJwtAuth
+from backend.common.security.jwt import DependsJwtAuth, get_token, jwt_decode
 from backend.database.db import CurrentSession, CurrentSessionTransaction
 from backend.plugin.oauth2.enums import UserSocialType
 from backend.plugin.oauth2.service.user_social_service import user_social_service
@@ -24,7 +24,10 @@ async def get_binding_auth_url(request: Request, source: UserSocialType) -> Resp
 @router.get('/me/reauth', summary='获取重新验证身份的授权链接', dependencies=[DependsJwtAuth])
 async def get_reauth_auth_url(db: CurrentSession, request: Request, source: UserSocialType) -> ResponseSchemaModel[str]:
     # 没有密码的账号第一次设密码前，用已绑定的第三方账号重新授权一次（#402）
-    url = await user_social_service.get_reauth_url(db=db, user_id=request.user.id, source=source)
+    session_uuid = jwt_decode(get_token(request)).session_uuid
+    url = await user_social_service.get_reauth_url(
+        db=db, user_id=request.user.id, session_uuid=session_uuid, source=source
+    )
     return response_base.success(data=url)
 
 

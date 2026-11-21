@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { Trans, useTranslation } from 'react-i18next'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   IconAlertTriangle, IconAt, IconAuth2fa, IconBellRinging, IconCheck, IconClock, IconDeviceMobile, IconExternalLink, IconFileExport, IconIdBadge2,
   IconInfoCircle, IconKey, IconLoader2, IconMail, IconPhoto, IconPlugConnected,
@@ -1105,6 +1105,7 @@ function ChangePasswordBlock() {
  */
 function FirstPasswordBlock({ verified }: { verified: boolean }) {
   const { t } = useTranslation()
+  const qc = useQueryClient()
   const social = useQuery(socialBindingsQuery)
   const getUrl = useReauthUrl()
   const mut = useUpdatePassword()
@@ -1139,6 +1140,9 @@ function FirstPasswordBlock({ verified }: { verified: boolean }) {
       setBye(3)
     } catch (err) {
       setState({ kind: 'error', msg: errMsg(err, t('密码设置失败')) })
+      // 凭据可能已经过期 / 用掉了（10 分钟、一次性）：重取状态，`verified` 变 false 就退回「先验证身份」那一步，
+      // 错误照样显示在那里。不重取的话表单还写着「身份已验证」，怎么提交都是同一句拒绝、却没有重新验证的入口（#402 评审）
+      void qc.invalidateQueries({ queryKey: passwordStatusQuery.queryKey })
     }
   }
 

@@ -29,6 +29,8 @@ USERNAME = 'pytest_nopwd_402'
 SEED_PASSWORD = 'Tmp@123456'
 NEW = 'Nw1@abcdef'
 MY_SID = 402000111
+#: fixture 顺手建的第二个会话：pk → 它的 Authorization 头
+OTHER_SESSION: dict[int, dict] = {}
 OTHER_SID = 402000999
 
 
@@ -114,12 +116,17 @@ def passwordless(
         _run_ticket_flow(client, url)
         assert _sql('SELECT 1 FROM sys_user_social WHERE user_id = :pk', pk=pk), '前置：绑定没建出来'
 
+        # 同一个人的另一个会话（另一台设备 —— 或者偷来的 token）
+        body2 = client.post('/auth/login/swagger', params={'username': USERNAME, 'password': SEED_PASSWORD}).json()
+        OTHER_SESSION[pk] = {'Authorization': f'{body2["token_type"]} {body2["access_token"]}'}
+
         # 变成第三方建出来的那种号：没有密码
         _sql('UPDATE sys_user SET password = NULL WHERE id = :pk', pk=pk)
         assert client.get('/sys/users/me', headers=headers).status_code == 200, '前置：会话要还能用'
         yield pk, headers
     finally:
         client.cookies.clear()
+        OTHER_SESSION.pop(pk, None)
         for table in ('sys_user_social', 'sys_user_password_history', 'sys_user_role'):
             _sql(f'DELETE FROM {table} WHERE user_id = :pk', pk=pk)
         _sql('DELETE FROM sys_user WHERE id = :pk', pk=pk)
@@ -230,3 +237,94 @@ def test_superuser_can_reset_a_passwordless_account(
     res = client.put(f'/sys/users/{pk}/password', headers=token_headers, json={'password': NEW})
     assert res.json()['code'] == 200, res.text
     assert client.post('/auth/login/swagger', params={'username': USERNAME, 'password': NEW}).status_code == 200
+
+
+def test_the_reauth_only_counts_for_the_session_that_did_it(
+    client: TestClient, passwordless: tuple[int, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 凭据记在发起重新授权的那个会话上：本人在这台设备上验证完，另一个会话（偷来的 token）用不上
+
+    原来凭据按用户记：攻击者拿着偷来的 token 轮询 `password-status`，一看到 `reauth_verified` 变 true
+    就抢先 PUT 一个只有自己知道的密码 —— 本人那次验证反倒成了替攻击者开门
+    """
+    pk, headers = passwordless
+    other = OTHER_SESSION[pk]
+    assert client.get('/sys/users/me', headers=other).status_code == 200, '前置：另一个会话要还活着'
+    _reauth(client, headers, monkeypatch, MY_SID)
+
+    assert client.get('/sys/users/me/password-status', headers=other).json()['data']['reauth_verified'] is False
+    assert _set_first_password(client, other)['code'] != 200
+    assert _stored_password(pk) is None, '另一个会话把密码设上了'
+    # 发起的那个会话照样能用
+    assert _set_first_password(client, headers)['code'] == 200
+
+
+def test_reauth_link_is_refused_once_the_account_has_a_password(
+    client: TestClient, passwordless: tuple[int, dict]
+) -> None:
+    """有密码的账号不需要、也不该拿到重新验证链接（凭据只给第一次设密码用）"""
+    pk, headers = passwordless
+    _sql("UPDATE sys_user SET password = 'x' WHERE id = :pk", pk=pk)
+    res = client.get('/oauth2/me/reauth', params={'source': 'Github'}, headers=headers)
+    assert res.json()['code'] != 200, res.text
+
+
+def test_concurrent_unbinds_cannot_strip_the_last_login(passwordless: tuple[int, dict]) -> None:
+    """🔴 两个第三方都绑着的无密码账号，同时解绑两个：不能两个都解掉
+
+    「数一数还剩几个 → 删」中间没锁：两个事务都数到 2、都放行，各删各的那一行（不同行，不互斥），
+    账号就剩下没有密码、没有第三方 —— 再也登不进来。这里让两个事务都读完再往下走，复现那个交错
+    """
+    from datetime import UTC, datetime
+
+    from backend.common.exception import errors
+    from backend.plugin.oauth2.crud.crud_user_social import user_social_dao
+    from backend.plugin.oauth2.enums import UserSocialType
+    from backend.plugin.oauth2.service.user_social_service import user_social_service
+
+    pk, _ = passwordless
+    _sql(
+        'INSERT INTO sys_user_social (id, sid, source, user_id, created_time, deleted) '
+        "VALUES (:id, 'g-402', 'Google', :pk, :now, 0)",
+        id=pk + 7,
+        pk=pk,
+        now=datetime.now(UTC),
+    )
+    assert len(_sql('SELECT 1 FROM sys_user_social WHERE user_id = :pk AND deleted = 0', pk=pk)) == 2
+
+    async def run() -> list[object]:
+        engine = create_database_async_engine(get_database_url(unittest=True))
+        both_counted = asyncio.Event()
+        arrived = 0
+        original = user_social_dao.get_by_user_id
+
+        async def counted(*args: object, **kwargs: object) -> object:
+            nonlocal arrived
+            rows = await original(*args, **kwargs)
+            arrived += 1
+            if arrived >= 2:
+                both_counted.set()
+            # 等另一个事务也数完再往下删；被锁挡住的那个永远到不了这里 → 等满 1 秒自己走
+            try:
+                await asyncio.wait_for(both_counted.wait(), timeout=1)
+            except TimeoutError:
+                pass
+            return rows
+
+        async def unbind(source: UserSocialType) -> object:
+            async with create_database_async_session(engine).begin() as db:
+                return await user_social_service.unbinding(db=db, user_id=pk, source=source)
+
+        user_social_dao.get_by_user_id = counted  # type: ignore[method-assign]
+        try:
+            return await asyncio.gather(
+                unbind(UserSocialType.github), unbind(UserSocialType.google), return_exceptions=True
+            )
+        finally:
+            user_social_dao.get_by_user_id = original  # type: ignore[method-assign]
+            await engine.dispose()
+
+    results = asyncio.run(run())
+    left = _sql('SELECT source FROM sys_user_social WHERE user_id = :pk AND deleted = 0', pk=pk)
+    assert len(left) == 1, f'剩下 {left}，两次解绑的结果：{results}'
+    assert sum(isinstance(r, errors.RequestError) for r in results) == 1, results

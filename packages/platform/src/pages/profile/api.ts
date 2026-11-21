@@ -147,12 +147,13 @@ export function useUpdateEmail() {
  * 前提是先完成了 {@link useReauthUrl} 那一趟第三方重新授权（#402），否则后端拒绝。
  */
 export function useUpdatePassword() {
-  const qc = useQueryClient()
+  // 🔴 成功后**不要**作废 `passwordStatusQuery`（#402 评审）：服务端这时已经撤掉了本人所有会话，
+  // 立刻重取只会 401 → 当场被踢回登录页、看不到「N 秒后跳转」；就算取到了，`has_password` 一翻
+  // 密码块就换了组件，倒计时跟着卸载。倒计时结束本来就 `endSession()`，状态不用刷新
   return useMutation({
     meta: { suppressErrorToast: true },
     mutationFn: (v: { old_password?: string; new_password: string; confirm_password: string }) =>
       api.PUT<null>('/api/v1/sys/users/me/password', { body: v }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: passwordStatusKey }),
   })
 }
 

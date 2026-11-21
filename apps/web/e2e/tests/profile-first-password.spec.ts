@@ -106,3 +106,55 @@ test("状态取不到：错误 + 重试，不退回要旧密码的表单", async
   // admin 真有密码：重试后回到「修改密码」，要旧密码
   await expect(block.getByTestId("p-old")).toBeVisible()
 })
+
+test("凭据过期 / 用掉了：提交被拒后退回「先验证身份」，不卡在只能重复提交的表单上", async ({
+  authedPage: page,
+}) => {
+  let verified = true
+  await page.route("**/api/v1/sys/users/me/password-status", (route: Route) =>
+    route.fulfill(ok({ has_password: false, reauth_verified: verified }))
+  )
+  await page.route("**/api/v1/oauth2/me/bindings", (route: Route) => route.fulfill(ok(["Github"])))
+  await page.route("**/api/v1/sys/users/me/password", (route: Route) => {
+    verified = false // 服务端那张 10 分钟的凭据已经没了
+    return route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({ code: 400, msg: "请先重新验证身份（E2E）", data: null }),
+    })
+  })
+
+  await page.goto("/profile?section=security")
+  const block = page.locator(BLOCK)
+  await expect(block.getByTestId("p-reauth-ok")).toBeVisible()
+  await block.getByTestId("p-new").fill("Nw1@abcdef")
+  await block.getByTestId("p-confirm").fill("Nw1@abcdef")
+  await block.getByTestId("p-password-save").click()
+
+  await expect(block.getByTestId("p-reauth-Github")).toBeVisible()
+  await expect(block.getByTestId("card-error")).toContainText("请先重新验证身份（E2E）")
+})
+
+test("设完密码：倒计时留在原处，不去重取状态（会话已被撤掉，重取只会 401）", async ({ authedPage: page }) => {
+  let saved = false
+  let statusCallsAfterSave = 0
+  await page.route("**/api/v1/sys/users/me/password-status", (route: Route) => {
+    if (saved) statusCallsAfterSave++
+    // 真后端此时已经有密码了 —— 重取到的话密码块会换成「修改密码」，倒计时跟着卸载
+    return route.fulfill(ok({ has_password: saved, reauth_verified: !saved }))
+  })
+  await page.route("**/api/v1/oauth2/me/bindings", (route: Route) => route.fulfill(ok(["Github"])))
+  await page.route("**/api/v1/sys/users/me/password", (route: Route) => {
+    saved = true
+    return route.fulfill(ok(null))
+  })
+
+  await page.goto("/profile?section=security")
+  const block = page.locator(BLOCK)
+  await block.getByTestId("p-new").fill("Nw1@abcdef")
+  await block.getByTestId("p-confirm").fill("Nw1@abcdef")
+  await block.getByTestId("p-password-save").click()
+
+  await expect(block.getByTestId("p-password-bye")).toContainText("密码已设置")
+  expect(statusCallsAfterSave).toBe(0)
+})

@@ -182,6 +182,7 @@ error:
     last_login_unbind_forbidden: 这个账号还没有密码，解绑最后一个第三方账号之后就再也登不进来了。请先设置密码再解绑
     reauth_mismatch: 授权回来的 {source} 账号不是绑定在你名下的那一个，身份验证未通过
     reauth_not_bound: 你还没有绑定 {source} 账号，不能用它验证身份
+    reauth_not_needed: 这个账号已经有密码了，修改密码请输入当前密码
     social_login_unsupported: 暂不支持 {social} OAuth2 登录
     state_already_claimed: 这个授权链接已经被打开过了，请回到页面重新发起
     state_invalid: OAuth2 状态信息无效
