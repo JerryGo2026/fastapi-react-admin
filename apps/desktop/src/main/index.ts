@@ -1,12 +1,15 @@
 import { app, BrowserWindow } from "electron"
 
+import { IPC } from "@admin/platform/desktop/contract"
 import type { AppInfo } from "@admin/platform/desktop/contract"
 
 import { readConfig } from "./config"
 import { CardReaderAdapter } from "./devices/card-reader"
 import { registerDevice, stopAllDevices } from "./devices/registry"
-import { registerIpc } from "./ipc"
+import { broadcast, registerIpc } from "./ipc"
+import { syncLoginItem } from "./login-item"
 import { registerAppProtocolHandler, registerAppScheme } from "./protocol"
+import { scheduleUpdateChecks } from "./updater"
 import { createMainWindow, DEV_SERVER_URL } from "./window"
 
 /**
@@ -42,9 +45,8 @@ if (!gotLock) {
   void app.whenReady().then(() => {
     const cfg = readConfig()
 
-    if (cfg.autoLaunch && app.isPackaged) {
-      app.setLoginItemSettings({ openAtLogin: true, args: [] })
-    }
+    // 开和关都同步（#428）：只在 true 时注册的话，改回 false 系统登录项一直留着
+    syncLoginItem(cfg.autoLaunch)
 
     registerAppProtocolHandler()
 
@@ -57,6 +59,9 @@ if (!gotLock) {
     registerIpc(info)
 
     createMainWindow()
+
+    // 自动更新由主进程自己定时查（#428）—— 渲染层从来没调过 updater.check()
+    scheduleUpdateChecks((event) => broadcast(IPC.updaterEvent, event))
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createMainWindow()

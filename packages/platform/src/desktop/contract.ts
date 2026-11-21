@@ -88,10 +88,15 @@ export interface DesktopConfig {
   printerName: string
   /** 全屏独占。自助终端场景用 */
   kiosk: boolean
-  /** 开机自启 */
+  /** 开机自启。开和关都会同步到系统（Windows / macOS 登录项，Linux 的 XDG autostart）；只在正式包里生效 */
   autoLaunch: boolean
-  /** electron-updater 的 generic 源，形如 `https://releases.example.com/desktop`；空 = 关闭自动更新 */
+  /** electron-updater 的 generic 源，形如 `https://releases.example.com/desktop`；空 = 用打包时写进 app-update.yml 的源（GitHub Release） */
   updateUrl: string
+  /**
+   * 主进程定时自动检查更新（启动 30 秒后一次、之后每 4 小时）；缺省 / `true` = 查，`false` = 不查。
+   * 只管定时检查，渲染层手动 `updater.check()` 不受影响。沿用本模板 `publish` 段的下游项目、要钉版本的现场关掉它
+   */
+  autoUpdate: boolean
 }
 
 // ── 认证 ────────────────────────────────────────────────────────────────────

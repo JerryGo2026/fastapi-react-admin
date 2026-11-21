@@ -342,3 +342,59 @@ refresh 也 401）。#138 之前 access 活 1 天，表现成每天重登一次�
 ⚠️ **只过了类型检查，没在打包出来的桌面端里实测过。** 第一次出包后要手验：登录 → 等 access 过期（或在
 「在线用户」页把这台踢掉）→ 看是续上了 / 回登录页并说明原因。
 
+## 🔴 自动更新要有人调 `checkForUpdates`；开机自启开和关都要同步（#428）
+
+**症状**：① 正式包从不自动更新 —— 主进程只注册了 `updater:check` 这条 IPC、preload 也暴露了
+`desktop.updater.check()`，但 web / platform 里**没有任何一处调用**，主进程启动时也不查；
+release-notes 却写着「自动更新正常」。② 开机自启只能开不能关：`autoLaunch` 改回 `false` 后
+系统登录项一直留着，`config.json` 里明明是 `false`。两条都不报错。
+
+**根因**：① 「谁在何时调」没人负责，IPC 和桥都在、调用方不存在。
+② `index.ts` 写的是 `if (cfg.autoLaunch && app.isPackaged) setLoginItemSettings({ openAtLogin: true })`，
+false 分支什么都不做；另外 Electron 的 `setLoginItemSettings` 在 **Linux 上不起作用**（文档只列 macOS / Windows），
+就算写对了 AppImage 也没有开机自启。
+
+**修法**：
+- `updater.ts` 的 `scheduleUpdateChecks()`，`index.ts` 在窗口建好后调：启动 30 秒后查一次、之后每 4 小时。
+  放主进程不放渲染层 —— 不依赖登录、不依赖哪个页面挂着，kiosk 停在登录页也照查。
+  未打包不安排（没有 `app-update.yml`）；**macOS 不安排**（未签名包下完装不上，定时查等于反复下完整 zip 再失败，
+  签了名的下游删掉那一行）。失败走 `console.warn` 进主进程日志 + 照常广播 `error` 事件，下一轮照查。
+  更新源不变：`config.json` 的 `updateUrl` 优先，否则 `app-update.yml`（`publish` 段，GitHub Release 的 `latest*.yml`）。
+  下载完不弹重启，`autoInstallOnAppQuit` 下次退出时静默装。
+- `login-item.ts` 的 `syncLoginItem(enabled)`：启动时**无条件**同步一次，`config:set` 里 `autoLaunch` 变了再同步一次。
+  Windows / macOS 走 `setLoginItemSettings({ openAtLogin })`；Linux 写 / 删
+  `$XDG_CONFIG_HOME/autostart/<可执行文件名>.desktop`，`Exec` 取 `APPIMAGE`（`process.execPath` 是
+  `/tmp/.mount_xxx` 临时挂载点，关掉应用就没了），每次启动重写（AppImage 更新后文件名可能变）。未打包一律不碰。
+
+⚠️ **下载完要等退出才装**：一直不关的终端机会一直停在旧版。渲染层没有「已下载，重启更新」的提示 ——
+要的话订阅 `desktop.updater.on` 的 `downloaded` 事件、调 `quitAndInstall()`。
+
+**实测证据**（2026-11-22）：`tests/lifecycle.test.ts` 9 条（跑真 `index.ts`，Electron / electron-updater / fs 是 mock），
+把 `index.ts` / `ipc.ts` / `updater.ts` 换回修复前的版本跑是 5 红 4 绿（绿的是「未打包不碰」「macOS 不查」这类旧代码天然满足的守卫）；
+修复后 9 条 + 原有 12 条全绿。**真 Electron 42**（未打包，xvfb，`--no-sandbox`，包一层脚本把 `app.isPackaged` 改成 true
+再 `require` 构建产物，`XDG_CONFIG_HOME` 指向空目录、`APPIMAGE` 设成带空格的假路径）：`autoLaunch: true` 启动后
+`autostart/electron.desktop` 写出、`Exec="/opt/x/admin desktop.AppImage"`；约 30 秒后真的走进 electron-updater，
+失败日志 `[desktop] 检查更新失败: App version is not a valid semver version: "0.0"`，进程没崩；改成 `false` 再启动，文件被删掉。
+**没实测**：打包后的安装包、Windows 注册表 Run 键 / macOS 登录项的真实增删、对真 `latest.yml` 查到并下载新版本。
+
+**评审跟进（2026-11-22）**，五处都是「不报错、只是没生效」：
+
+- 🔴 **AppImage 自动更新一次之后开机自启就失效**：发布的 AppImage 名字里带版本号，electron-updater 的 `AppImageUpdater`
+  装新版时**删掉旧文件、按新包名落地**（发 `appimage-filename-updated`），autostart 的 `Exec` 还指着旧路径 ——
+  下次开机应用起不来，「每次启动重写」也就没机会跑。`updater.ts` 监听这条事件，`autoLaunch` 为 true 时用新路径重写。
+- 🔴 **下游沿用 `publish` 段会被装上本模板的版本**：有了定时检查，没填 `updateUrl` 的客户机会去拉 `electron-builder.yml`
+  里那个 GitHub 仓库的 Release。加了 `config.json` 的 `autoUpdate`（缺省 true；`false` 关掉定时检查，手动检查不受影响，每轮现读），
+  并在 `publish` 段注明下游要改 owner / repo。
+- `Exec` 转义要**两层**：先按引号规则给 `"` `` ` `` `$` `\` 加反斜杠，再按 string 类型规则把反斜杠整体翻倍（规范原文：字面反斜杠写四个）；
+  `%` 写成 `%%`。只转一层时 GLib 把 `\"` 当非法转义。
+- 手改出来的 `"autoLaunch": "false"` 是 truthy：Linux 上反着写出 autostart，Windows / macOS 上 `setLoginItemSettings` 抛错（被接住，登录项撤不掉）。
+  `syncLoginItem` 一律按 `=== true` 判。
+- 失败去重：electron-updater 的 `checkForUpdates` 失败时**先发 `error` 事件再 reject 同一个对象**，监听和 catch 都报的话每次失败两条日志、两条事件；
+  catch 里只报监听没见过的那个。
+
+**实测证据**：`tests/lifecycle.test.ts` 新增 4 条、加强 1 条（失败只报一次），在评审前的代码上这 5 条全红，修复后桌面端 25 条全绿。
+**没实测**：`AppImageUpdater.doInstall` 的换名逻辑是读 electron-updater 6.8.x 源码（`AppImageUpdater` 的 `doInstall`）得来的，没在真 AppImage 上跑过一次更新。
+转义拿 GLib 2（PyGObject 的 `GLib.KeyFile` + `GLib.shell_parse_argv`）实测过：路径 `/opt/100%/a\b "x" $y.AppImage`，
+旧写法 `get_string("Exec")` 直接报 `value that cannot be interpreted`；新写法还原出单个参数 `/opt/100%%/a\b "x" $y.AppImage`
+（`%%` → `%` 是启动器展开字段码那一步做的，这里没覆盖）。只含空格的路径两种写法都对，所以 PR 里「带空格的假路径」那次实测没撞到。
+

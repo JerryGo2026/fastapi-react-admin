@@ -28,7 +28,8 @@
   - 想去掉这些提示：Windows 侧有面向开源项目的免费证书方案（SignPath Foundation），
     macOS 侧没有免费路，需要 Apple Developer Program（$99/年）
 - 🔴 **macOS 上的自动更新不工作**（未签名）。electron-updater 要校验运行中应用的代码签名，
-  拿不到就拒绝安装更新。Windows 与 Linux(AppImage) 的自动更新正常
+  拿不到就拒绝安装更新，所以 macOS 版不自动检查。Windows 与 Linux(AppImage)：启动约 30 秒后检查一次、之后每 4 小时一次，
+  有新版就在后台下载，**下次退出时**静默安装（不会在使用中弹重启）
 - **读卡器等本地硬件是桩模式**：厂商的原生助手不在仓库里（那是现场的东西），
   所以这个包里没有。界面上相关功能会走模拟数据
 - **打印**：Windows 上是真的静默打印；macOS/Linux 上打印链路能跑，但没有在真机标签机上验过
@@ -37,5 +38,6 @@
 
 默认读这个仓库的 Release。内网部署（客户出不去公网）可以在客户机的 `config.json` 里
 填 `updateUrl`，指向自己的静态目录 —— **不用为内网单独打一版**。
+不想让某台机器自动升级（要钉版本），在它的 `config.json` 里写 `"autoUpdate": false`。
 
 ---

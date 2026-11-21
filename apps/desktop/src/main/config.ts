@@ -19,6 +19,7 @@ const DEFAULTS: DesktopConfig = {
   kiosk: false,
   autoLaunch: false,
   updateUrl: "",
+  autoUpdate: true,
 }
 
 let cache: DesktopConfig | null = null

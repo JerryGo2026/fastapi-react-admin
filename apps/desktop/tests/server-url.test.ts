@@ -87,6 +87,7 @@ test("主进程的同步通道读的是 config.json 那份 serverUrl（与 auth.
     "./auth": {},
     "./config": { readConfig: () => ({ serverUrl: "https://runtime.example.com" }), writeConfig() {} },
     "./devices/registry": { onDeviceEvent() {} },
+    "./login-item": { syncLoginItem() {} },
     "./print": {},
     "./updater": {},
   }) as { registerIpc: (info: () => unknown) => void }
@@ -164,6 +165,7 @@ function loadIpcWithConfig(initial: string) {
       },
     },
     "./devices/registry": { onDeviceEvent() {} },
+    "./login-item": { syncLoginItem() {} },
     "./print": {},
     "./updater": {},
   }) as { registerIpc: (info: () => unknown) => void }

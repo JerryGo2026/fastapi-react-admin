@@ -45,7 +45,7 @@ if (isDesktop()) {
 
 ## 桌面端怎么自动更新？
 
-用的是 `electron-updater`。`config.json` 里填了 `updateUrl` 就用它，这是 generic 源，任何能列目录的静态 HTTP 服务都行，比如客户内网。没填就用打包时写进 `app-update.yml` 的源，也就是本仓库的 GitHub Releases。更新包自动下载，在应用退出时安装。`quitAndInstall(true, true)` 静默安装并自动重启；不带这两个参数的话，弹出来的是 NSIS 安装向导，停在那里等人点「下一步」。渲染层通过 `desktop().updater.check()`、`.on()`、`.quitAndInstall()` 驱动更新。web 端自己不会调 `check()`，需要你在应用里接一个按钮或在启动时调用。
+用的是 `electron-updater`。`config.json` 里填了 `updateUrl` 就用它，这是 generic 源，任何能列目录的静态 HTTP 服务都行，比如客户内网。没填就用打包时写进 `app-update.yml` 的源，也就是本仓库的 GitHub Releases。更新包自动下载，在应用退出时安装。`quitAndInstall(true, true)` 静默安装并自动重启；不带这两个参数的话，弹出来的是 NSIS 安装向导，停在那里等人点「下一步」。渲染层通过 `desktop().updater.check()`、`.on()`、`.quitAndInstall()` 驱动更新。打包后的 Windows / Linux 版由主进程自己定时检查（启动 30 秒后一次、之后每 4 小时，`autoUpdate: false` 关掉）；macOS 版未签名，不自动检查。
 
 | 平台 | 自动更新 |
 |---|---|
@@ -90,6 +90,7 @@ if (isDesktop()) {
 | 桌面 | 同上 | `kiosk` | `false` | 全屏锁定模式 |
 | 桌面 | 同上 | `autoLaunch` | `false` | 开机自启（只对打包后的正式包生效） |
 | 桌面 | 同上 | `updateUrl` | 空 | 自动更新源；空 = GitHub Releases |
+| 桌面 | 同上 | `autoUpdate` | `true` | 主进程定时自动检查更新（Windows / Linux，启动 30 秒后一次、之后每 4 小时）；`false` = 不定时检查，手动检查不受影响 |
 | 移动 | App 里的服务器地址设置，存在设备上 | —— | 构建时的 `EXPO_PUBLIC_API_BASE`，没设是 `http://127.0.0.1:8088` | 保存前先探一次 `/auth/captcha` 确认连得通。`EXPO_PUBLIC_*` 是构建时替换的，打成安装包后只能在 App 里改 |
 
 ## 代码在哪

@@ -5,12 +5,13 @@ import type { AuthLoginInput, AuthMfaInput, AuthPhoneLoginInput, DesktopConfig, 
 
 import * as auth from "./auth"
 import { readConfig, writeConfig } from "./config"
+import { syncLoginItem } from "./login-item"
 import { listDevices, onDeviceEvent, simulateDevice, startDevice, stopDevice } from "./devices/registry"
 import { listPrinters, printHtml, printHtmlToPdf } from "./print"
 import { checkForUpdates, quitAndInstall } from "./updater"
 
 /** 主进程 → 所有窗口的单向广播 */
-function broadcast(channel: string, payload: unknown): void {
+export function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
   }
@@ -21,8 +22,10 @@ export function registerIpc(appInfo: () => unknown): void {
 
   ipcMain.handle(IPC.configGet, () => readConfig())
   ipcMain.handle(IPC.configSet, (_e, patch: Partial<DesktopConfig>) => {
-    const before = readConfig().serverUrl
+    const { serverUrl: before, autoLaunch: wasAutoLaunch } = readConfig()
     const next = writeConfig(patch)
+    // 开机自启当场同步（#428）：只在启动时同步的话，关掉之后到下次重启之间登录项还在
+    if (next.autoLaunch !== wasAutoLaunch) syncLoginItem(next.autoLaunch)
     // 🔴 换了服务器就删掉上一台的 refresh token（#392 评审跟进）：不删的话下次 restore()
     // 会把 A 的长效凭据当 Cookie 头发给 B —— 填错的、不可信的、或者渲染层被注入改掉的地址
     if (next.serverUrl !== before) auth.clearRefreshToken()
