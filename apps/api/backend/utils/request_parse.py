@@ -162,7 +162,8 @@ async def parse_ip_info(request: Request) -> IpInfo:
     ip = get_request_ip(request)
     location = await redis_client.get(f'{settings.IP_LOCATION_REDIS_PREFIX}:{ip}')
     if location:
-        country, region, city = location.split('|')
+        # 空串 = 没有（#401 之前写进去的是字符串 'None'，缓存 24 小时，读的时候一并认）
+        country, region, city = (part if part and part != 'None' else None for part in location.split('|'))
         return IpInfo(ip=ip, country=country, region=region, city=city)
 
     location_info = None
@@ -177,7 +178,8 @@ async def parse_ip_info(request: Request) -> IpInfo:
         city = location_info.get('city')
         await redis_client.set(
             f'{settings.IP_LOCATION_REDIS_PREFIX}:{ip}',
-            f'{country}|{region}|{city}',
+            # 🔴 不能 f'{country}|…'：None 会存成字符串 'None'，命中缓存时城市列显示「None」（#401）
+            '|'.join(part or '' for part in (country, region, city)),
             ex=settings.IP_LOCATION_EXPIRE_SECONDS,
         )
     return IpInfo(ip=ip, country=country, region=region, city=city)

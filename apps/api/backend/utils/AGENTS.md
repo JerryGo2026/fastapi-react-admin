@@ -193,3 +193,14 @@ xlsx 走 `excel_ops.xlsx_text`，⚠️ 那里**反着**用 `data_only=True`：�
 
 **实测证据**：`tests/test_limiter_noscript.py`（真实 Redis，put → `SCRIPT FLUSH` → 再 put）；本机 api：
 `SCRIPT FLUSH` 之后验证码修复前 500、修复后 200。
+
+## #401：雪花发号器 · 限流桶 · IP 属地缓存
+
+| 症状 | 根因 | 修法 | 实测证据 |
+|---|---|---|---|
+| 🔴 配了 `SNOWFLAKE_DATACENTER_ID` / `SNOWFLAKE_WORKER_ID` 的部署偶尔两条记录 ID 一样 | 固定节点不进 Redis：读同一份 `.env` 的所有进程（`--workers 2` 的两个 uvicorn worker + celery worker）共用一个节点号，同一毫秒各发一个序号 0 的 ID 就撞了；`check_production_settings` 只看配置，看不到有几个进程 | 固定节点也在 Redis 里占租约（同一个 key 前缀、同一套心跳，`claim_fixed_node`）：被别的活着的进程占着就**拒绝启动**；占不到时最多等一个 TTL，被 SIGKILL 的上一个进程留下的 key 过期后照常起来 | `test_snowflake_node_lease.py`：两个发号器同一个固定节点，第二个 `init()` 报 `fixed_node_taken`；第一个放掉之后第二个能占上；死进程留下的 key 过期后能占上。变异：去掉占位那一行 → 两条都红 |
+| 🔴 NTP 回拨 5 秒 → 整个进程冻 5 秒，日志只有一条 warning | 回拨 10 秒以内时 `_till_next_ms` 持锁 `time.sleep(0.0001)` 忙等，而 `generate()` 在事件循环线程里被调（模型的 `default_factory`） | 不等：时钟落后时沿用上一个时间戳往下发（逻辑时钟），序号用满了借下一毫秒；节点号本进程独占，ID 照样唯一递增。落后超过 `CLOCK_BACKWARD_TOLERANCE_MS` 才拒绝发号。⚠️ 正常情况下「同一毫秒序号用满」也改成借下一毫秒，不再 sleep | `test_snowflake_clock.py`：把 `time.sleep` 换成抛异常，回拨 5 秒后连发 1 万个（跨过一次 4096），修之前红在「不能 sleep」，修之后全部唯一、递增 |
+| 进程重启 / 本地 bucket 缓存超过 4096 被淘汰之后，Redis 里每个「IP × 限流路由」留下一个永不过期的 zset | pyrate_limiter 4.4.0 的 `PUT_ITEM` 只 `ZADD`，清理靠本进程的 leaker | `RedisTimeBucket` 换成 `PUT_ITEM_WITH_TTL`（原脚本末尾补 `PEXPIRE 最长窗口 + 1 秒`，`init` 和 `NoScriptError` 重载都用它）；启动时 `sweep_limiter_keys()` 给升级前留下的无 TTL 桶补 1 小时 | `test_limiter_noscript.py`：写入后 `PTTL` 在窗口附近，修之前是 `-1`；`SCRIPT FLUSH` + `PERSIST` 之后再写，TTL 照样补上；启动清扫只动没 TTL 的 key |
+| 登录日志 / 操作日志的城市列显示 `None`（首次解析之后 24 小时） | 缓存写的是 `f'{country}\|{region}\|{city}'`，`None` 存成字符串 `'None'`，读回来原样当值 | 写空串、读回来空串当 `None`；遗留的 `'None'` 读的时候一并认 | `test_ip_location_offline.py`：`city=None` 的解析结果，第二次命中缓存修之前是 `'None'` |
+
+⚠️ 换了 pyrate_limiter 版本要重新核对：`_put_item_with_ttl()` 靠替换原脚本最后那行 `return -1` 打补丁，找不到就在 import 时 assert 失败（不会静默退回无 TTL 的版本）。

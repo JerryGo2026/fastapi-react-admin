@@ -31,6 +31,9 @@ return 0
 #: 心跳续租失败后的重试间隔（秒）。比心跳间隔短得多，好在本地租约到期前续上
 _HEARTBEAT_RETRY_SECONDS = 2
 
+#: 固定节点被占时多久再试一次（秒）。最多等一个 TTL：被 SIGKILL 的上一个进程没机会放节点，等它的租约过期
+_FIXED_NODE_RETRY_SECONDS = 1
+
 _RELEASE_NODE_LEASE = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
@@ -110,6 +113,32 @@ class SnowflakeNodeManager:
                     return datacenter_id, worker_id
 
         raise errors.ServerError(msg=t('error.snowflake.no_node_available'))
+
+    async def claim_fixed_node(self, datacenter_id: int, worker_id: int) -> None:
+        """占住 `.env` 里配的固定节点号；别的进程正占着就拒绝启动（#401）
+
+        🔴 原来固定节点不进 Redis：读同一份 `.env` 的所有进程（`--workers 2` 的两个 uvicorn worker + celery worker）
+        共用一个节点号，同一毫秒各发一个序号 0 的 ID 就撞了。现在和动态分配同一套租约（同一个 key 前缀，
+        动态分配扫描时也会跳过它）。
+
+        占不到时最多等一个 TTL 再报错：上一个进程被 SIGKILL 的话 key 还在，等它过期是正常的重启路径；
+        一直占不到就是真有另一个活着的进程配了同一个号。
+        """
+        deadline = time.monotonic() + settings.SNOWFLAKE_NODE_TTL_SECONDS + _FIXED_NODE_RETRY_SECONDS
+        warned = False
+        while not await self._register(datacenter_id, worker_id):
+            if time.monotonic() >= deadline:
+                log.error(f'雪花算法固定节点 {datacenter_id}/{worker_id} 已被其他进程占用，拒绝启动')
+                raise errors.ServerError(
+                    msg=t('error.snowflake.fixed_node_taken', datacenter_id=datacenter_id, worker_id=worker_id)
+                )
+            if not warned:
+                log.warning(
+                    f'雪花算法固定节点 {datacenter_id}/{worker_id} 正被占用，'
+                    f'最多等 {settings.SNOWFLAKE_NODE_TTL_SECONDS} 秒（上一个进程的租约过期）'
+                )
+                warned = True
+            await asyncio.sleep(_FIXED_NODE_RETRY_SECONDS)
 
     async def _register(self, datacenter_id: int, worker_id: int) -> bool:
         key = f'{self.node_redis_prefix}:{datacenter_id}:{worker_id}'
@@ -192,7 +221,8 @@ class Snowflake:
         self._lock = threading.Lock()
         self._initialized = False
         self._node_manager: SnowflakeNodeManager | None = None
-        self._auto_allocated = False  # 标记是否由 Redis 自动分配 ID
+        self._auto_allocated = False  # 标记是否由 Redis 自动分配 ID（固定节点也在 Redis 里占租约，见 init）
+        self._clock_behind = False  # 正处在时钟回拨里（只在进入时告警一次）
 
     async def init(self, redis: RedisCli | None = None) -> None:
         """初始化雪花算法
@@ -203,41 +233,36 @@ class Snowflake:
             return
 
         with self._lock:
-            # 环境变量固定分配
-            if settings.SNOWFLAKE_DATACENTER_ID is not None and settings.SNOWFLAKE_WORKER_ID is not None:
-                self.datacenter_id = settings.SNOWFLAKE_DATACENTER_ID
-                self.worker_id = settings.SNOWFLAKE_WORKER_ID
-                log.debug(
-                    f'雪花算法使用环境变量固定节点：datacenter_id={self.datacenter_id}, worker_id={self.worker_id}'
-                )
-            elif (settings.SNOWFLAKE_DATACENTER_ID is not None and settings.SNOWFLAKE_WORKER_ID is None) or (
-                settings.SNOWFLAKE_DATACENTER_ID is None and settings.SNOWFLAKE_WORKER_ID is not None
-            ):
+            fixed = settings.SNOWFLAKE_DATACENTER_ID is not None and settings.SNOWFLAKE_WORKER_ID is not None
+            if (settings.SNOWFLAKE_DATACENTER_ID is None) != (settings.SNOWFLAKE_WORKER_ID is None):
                 log.error('雪花算法 datacenter_id 和 worker_id 配置错误，只允许同时非 None 或同时为 None')
                 raise errors.ServerError(msg=t('error.snowflake.config_failed'))
+            manager = SnowflakeNodeManager(redis)
+            if fixed:
+                datacenter_id, worker_id = settings.SNOWFLAKE_DATACENTER_ID, settings.SNOWFLAKE_WORKER_ID
+                # 严格校验范围（先校验再占位，免得占一个不合法的 key）
+                if not (0 <= datacenter_id <= SnowflakeConfig.MAX_DATACENTER_ID):
+                    log.error(f'雪花算法 datacenter_id 配置失败，必须在 0~{SnowflakeConfig.MAX_DATACENTER_ID} 之间')
+                    raise errors.ServerError(msg=t('error.snowflake.datacenter_config_failed'))
+                if not (0 <= worker_id <= SnowflakeConfig.MAX_WORKER_ID):
+                    log.error(f'雪花算法 worker_id 配置失败，必须在 0~{SnowflakeConfig.MAX_WORKER_ID} 之间')
+                    raise errors.ServerError(msg=t('error.snowflake.worker_config_failed'))
+                await manager.claim_fixed_node(datacenter_id, worker_id)
+                log.debug(f'雪花算法使用环境变量固定节点：datacenter_id={datacenter_id}, worker_id={worker_id}')
             else:
                 # Redis 动态分配
-                self._node_manager = SnowflakeNodeManager(redis)
-                self.datacenter_id, self.worker_id = await self._node_manager.acquire_node_id()
+                datacenter_id, worker_id = await manager.acquire_node_id()
                 self._auto_allocated = True
-                await self._node_manager.start_heartbeat(self.datacenter_id, self.worker_id)
-                log.debug(
-                    f'雪花算法使用 Redis 动态分配节点：datacenter_id={self.datacenter_id}, worker_id={self.worker_id}'
-                )
-
-            # 严格校验范围
-            if not (0 <= self.datacenter_id <= SnowflakeConfig.MAX_DATACENTER_ID):
-                log.error(f'雪花算法 datacenter_id 配置失败，必须在 0~{SnowflakeConfig.MAX_DATACENTER_ID} 之间')
-                raise errors.ServerError(msg=t('error.snowflake.datacenter_config_failed'))
-            if not (0 <= self.worker_id <= SnowflakeConfig.MAX_WORKER_ID):
-                log.error(f'雪花算法 worker_id 配置失败，必须在 0~{SnowflakeConfig.MAX_WORKER_ID} 之间')
-                raise errors.ServerError(msg=t('error.snowflake.worker_config_failed'))
-
+                log.debug(f'雪花算法使用 Redis 动态分配节点：datacenter_id={datacenter_id}, worker_id={worker_id}')
+            # 固定 / 动态都靠心跳续租，`generate()` 都按租约判还能不能发号
+            await manager.start_heartbeat(datacenter_id, worker_id)
+            self._node_manager = manager
+            self.datacenter_id, self.worker_id = datacenter_id, worker_id
             self._initialized = True
 
     async def shutdown(self) -> None:
         """释放 Redis 节点"""
-        if self._node_manager and self._auto_allocated:
+        if self._node_manager:
             await self._node_manager.release()
 
     @staticmethod
@@ -247,43 +272,40 @@ class Snowflake:
         # 都报「时钟回拨」—— #281 登记了定时任务表、改调度要写审计行之后，整套 pytest 在那个文件之后连环红了几百条
         return int(time.time() * 1000)
 
-    def _till_next_ms(self, last_timestamp: int) -> int:
-        """等待直到下一毫秒"""
-        ts = self._current_ms()
-        while ts <= last_timestamp:
-            time.sleep(0.0001)
-            ts = self._current_ms()
-        return ts
-
     def generate(self) -> int:
-        """生成雪花 ID"""
+        """生成雪花 ID
+
+        🔴 **不等时钟**（#401）。`generate()` 在事件循环线程里被调（模型的 `default_factory`），
+        原来回拨 10 秒以内时持锁 `time.sleep` 忙等到时钟追上 —— NTP 回拨 5 秒 = 整个进程冻 5 秒。
+        现在时钟落后于上一个时间戳时沿用上一个时间戳往下发（逻辑时钟），同一毫秒的序号用满了就借下一毫秒；
+        节点号是本进程独占的（租约），所以 ID 照样唯一、递增。借出去的时间超过容忍阈值（回拨太大）才拒绝发号。
+        """
         if not self._initialized:
             raise errors.ServerError(msg=t('error.snowflake.generation_failed'))
 
         with self._lock:
-            if self._auto_allocated and self._node_manager and not self._node_manager.lease_valid:
+            if self._node_manager and not self._node_manager.lease_valid:
                 # 和「未初始化」分开报：这里是初始化过、但节点租约没续上（心跳没跑 / 被别的进程占了），
                 # 报成「未初始化」会把人带去查启动流程（#369 就是这么被带偏的）
                 raise errors.ServerError(msg=t('error.snowflake.lease_lost'))
 
-            timestamp = self._current_ms()
+            now = self._current_ms()
+            behind = self.last_timestamp - now
+            if behind > SnowflakeConfig.CLOCK_BACKWARD_TOLERANCE_MS:
+                raise errors.ServerError(msg=t('error.snowflake.clock_moved_backwards', ms=behind))
+            if behind > 0 and not self._clock_behind:
+                log.warning(f'检测到时钟回拨 {behind} ms，沿用上一个时间戳继续发号')
+            self._clock_behind = behind > 0
 
-            # 时钟回拨处理
-            if timestamp < self.last_timestamp:
-                back_ms = self.last_timestamp - timestamp
-                if back_ms <= SnowflakeConfig.CLOCK_BACKWARD_TOLERANCE_MS:
-                    log.warning(f'检测到时钟回拨 {back_ms} ms，等待恢复...')
-                    timestamp = self._till_next_ms(self.last_timestamp)
-                else:
-                    raise errors.ServerError(msg=t('error.snowflake.clock_moved_backwards', ms=back_ms))
-
-            # 同毫秒内序列号递增
-            if timestamp == self.last_timestamp:
+            if now > self.last_timestamp:
+                timestamp = now
+                self.sequence = 0
+            else:
+                # 同一毫秒（或时钟落后）：序号递增，用满了借下一毫秒
+                timestamp = self.last_timestamp
                 self.sequence = (self.sequence + 1) & SnowflakeConfig.SEQUENCE_MASK
                 if self.sequence == 0:
-                    timestamp = self._till_next_ms(self.last_timestamp)
-            else:
-                self.sequence = 0
+                    timestamp += 1
 
             self.last_timestamp = timestamp
 

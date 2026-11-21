@@ -394,3 +394,15 @@ SAVEPOINT、其余走 suppress、离线 `--sql` 模式直接放行（那时 bind
 **新库的正路是 `fba init`（create_all + 种子 + stamp head），不是重放迁移。**
 迁移链只对「基线之后才出现的增量」负责。真正需要守的是「下一条迁移在三种方言上
 都能编译」，那条守卫已经有了（`test_migrations_compile_offline_for_every_supported_dialect`）。
+
+### ⚠️ 加列时带的 `server_default` 要随后清掉 —— `g0000000aiproxy` 漏了一条（#401）
+
+加 NOT NULL 列回填存量行要 `server_default`，但模型侧默认值是 Python 级的，别的加列迁移都紧跟一句
+`alter_column(..., server_default=None)`。`g0000000aiproxy` 漏了：升级上来的库上 `ai_provider.use_proxy` 留着 DEFAULT，
+`create_all` 建的新库上没有（`test_model_matches_migrations` 不比默认值，抓不到）。SQL Server 上它是一个具名默认约束，
+挡住对这一列的 `drop_column`。那条进过 tag 不改，补一条 `au000000aiproxydefault`（表 / 列不在、本来没有 DEFAULT 都跳过；降级不加回去）。
+
+**实测证据**（2026-11-22）：SQL Server 2022 一次性容器，按 `g0000000aiproxy` 的写法加列后 `drop_column` 报
+`The object 'DF__ai_provid__use_p__…' is dependent on column 'use_proxy'`；跑过新迁移之后 default 是 `None`、再跑一次不报错、
+`drop_column` 成功。MySQL 8.4：default `'0'` → `None`，注释和非空都还在。PostgreSQL：`app/task/tests/test_migration_aiproxy_default.py`
+（事务里先加回 DEFAULT 再跑两遍，最后回滚）。

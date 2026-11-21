@@ -52,3 +52,38 @@ def test_garbage_is_still_reported(recording_log: _RecordingLog) -> None:
     """真不是 IP 的串说明上游取 IP 的逻辑出了问题，这个要报"""
     assert request_parse.get_location_offline('not-an-ip') is None
     assert len(recording_log.errors) == 1
+
+
+def test_a_missing_part_is_not_cached_as_the_string_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 #401：缓存写的是 `f'{country}|{region}|{city}'`，`city=None` 存成 `'None'`，之后 24 小时登录日志 / 操作日志的
+    城市列显示 `None`（`8.8.8.8` 首次解析就是这样）。命中缓存和第一次解析要给出同一个结果
+    """
+    import asyncio
+
+    from starlette.requests import Request
+
+    from backend.database.redis import RedisCli
+
+    ip = '192.0.2.77'
+    monkeypatch.setattr(request_parse.settings, 'IP_LOCATION_PARSE', 'offline')
+    monkeypatch.setattr(
+        request_parse, 'get_location_offline', lambda _ip: {'country': '美国', 'regionName': None, 'city': None}
+    )
+    request = Request({'type': 'http', 'headers': [], 'client': (ip, 1234)})
+
+    async def scenario() -> tuple[object, object]:
+        redis = RedisCli()
+        monkeypatch.setattr(request_parse, 'redis_client', redis)
+        key = f'{request_parse.settings.IP_LOCATION_REDIS_PREFIX}:{ip}'
+        try:
+            await redis.delete(key)
+            first = await request_parse.parse_ip_info(request)
+            cached = await request_parse.parse_ip_info(request)
+            return first, cached
+        finally:
+            await redis.delete(key)
+            await redis.aclose()
+
+    first, cached = asyncio.run(scenario())
+    assert (first.country, first.region, first.city) == ('美国', None, None)
+    assert (cached.country, cached.region, cached.city) == ('美国', None, None)

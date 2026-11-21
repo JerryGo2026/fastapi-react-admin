@@ -22,10 +22,15 @@ T = TypeVar('T')
 SchemaT = TypeVar('SchemaT')
 
 
+#: 页码上界（#401）。没有上界时超大页码让 OFFSET 溢出（PostgreSQL「value out of int64 range」），回 500 而不是 422。
+#: 一百万页 × 每页 200 = 2 亿，仍在 32 位整数之内，三个方言的 OFFSET 都放得下；真有这么多行也早该用筛选或游标分页
+MAX_PAGE = 1_000_000
+
+
 class _CustomPageParams(BaseModel, AbstractParams):
     """自定义分页参数"""
 
-    page: int = Query(1, ge=1, description='页码')
+    page: int = Query(1, ge=1, le=MAX_PAGE, description='页码')
     size: int = Query(20, gt=0, le=200, description='每页数量')
 
     def to_raw_params(self) -> RawParams:

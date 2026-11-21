@@ -100,10 +100,13 @@ class Settings(BaseSettings):
     CACHE_PUBSUB_CHANNEL: str = 'fba:cache:invalidate'
     # 进程内全局数据集（菜单表这种全局、少变的数据，见 `common/cache/dataset.py`）的缓存键前缀
     CACHE_DATASET_PREFIX: str = 'fba:dataset'
-    CACHE_PUBSUB_RECONNECT_DELAY: int = 5  # 重连延迟（秒）
-    CACHE_PUBSUB_MAX_RECONNECT_ATTEMPTS: int = 10  # 最大重连次数
+    CACHE_PUBSUB_RECONNECT_DELAY: int = 5  # 首次重连前的等待（秒），之后指数退避
+    # 退避封顶（秒）。不设重连次数上限：原来的 CACHE_PUBSUB_MAX_RECONNECT_ATTEMPTS 到次数就永久退出（#401），已删
+    CACHE_PUBSUB_RECONNECT_MAX_DELAY: int = 60
 
     # .env Snowflake
+    # 固定节点（下面两个都配）只给单进程用：启动时也在 Redis 里占租约，同一个号被别的活着的进程占着就拒绝启动（#401）。
+    # 读同一份 .env 的多个进程（`--workers 2`、celery worker）请留空，走动态分配
     SNOWFLAKE_ENABLED: bool = False
     SNOWFLAKE_DATACENTER_ID: int | None = None
     SNOWFLAKE_WORKER_ID: int | None = None
@@ -122,6 +125,8 @@ class Settings(BaseSettings):
     # 它只限定「一枚泄漏出去的 access token 能用多久」。会话本身活多久见下面的 SESSION_*
     TOKEN_EXPIRE_SECONDS: int = 60 * 30  # 30 分钟
     TOKEN_ONLINE_REDIS_PREFIX: str = 'fba:token_online'  # socket 在线状态（按会话 ID）
+    # 在线状态 key 的 TTL（秒），持有连接的进程每三分之一 TTL 续一次；进程被杀之后最多这么久显示成离线（#401）
+    TOKEN_ONLINE_TTL_SECONDS: int = 90
     TOKEN_REQUEST_UNDERLYING_SECURITY: bool = True
     TOKEN_REQUEST_PATH_EXCLUDE: list[str] = [  # JWT / RBAC 路由白名单
         f'{FASTAPI_API_V1_PATH}/auth/login',

@@ -362,3 +362,12 @@ dept / role / user / notice / file 这几个。
 - ⚠️ 只写目录自己那一行，不往下级写 —— 下级自己的状态保留着，重新启用目录就整棵原样回来
 
 **实测证据**：`app/admin/tests/api_v1/test_menu_disable.py`（变异记录见 [`pages/menu` 分册](../../../../../packages/platform/src/pages/menu/AGENTS.md)「三处『改了、保存成功、界面不变』」）。
+
+### 🔴 登录失败计数（账号 / IP）的 `INCR` 和 `EXPIRE` 必须在同一段 Lua 里（#401）
+
+**症状**：某个出口 IP（公司 NAT）后面的所有人都只能看到「用户名或密码有误」，要手工 `DEL fba:login:ip_failure:*` 才好。
+**根因**：账号维度 #311 已改成 Lua，IP 维度还是 `incr` 之后单独 `expire`、且只在 `count == 1` 时设过期 —— 两步之间进程被杀或
+Redis 超时，key 永不过期，累计到 `LOGIN_IP_LOCK_THRESHOLD` 之后这个 IP 永久被拒。而已经留下来的这种 key 原来的写法永远修不好。
+**修法**：两个维度共用 `_INCREMENT_LOGIN_FAILURE`，条件改成 `count == 1 or TTL < 0`：顺手给遗留的无 TTL 计数补上过期时间。
+**实测证据**：`tests/test_login_failure_ttl.py`（真实 Redis）：IP 维度把 `incr` / `expire` 换成抛异常，修之前红；
+预置一个没有 TTL 的计数（`5`），IP / 账号两个维度各失败一次，修之前 `TTL` 都是 `-1`。

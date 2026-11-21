@@ -292,3 +292,13 @@ E2E `data-change.spec.ts`。CI 的 PostgreSQL / SQL Server 两个 pytest job 都
 E2E 那条第一版**变异不红**：新名字写成 `${旧名字}改`，「显示了旧值」那句永远成立 —— 改成不相交的名字之后才红。
 
 **没验过**：MySQL（本机没有容器）· 提交时那一次 INSERT 的耗时。
+
+## #401：MySQL + 有夏令时的服务端时区，校验把回拨那一小时写的行报成 `modified`
+
+| 症状 | 根因 | 修法 | 实测证据 |
+|---|---|---|---|
+| `DATETIME_TIMEZONE=America/New_York` + MySQL，每年秋季回拨那一小时里写的审计行在「校验完整性」里全部报 `modified` | MySQL 上 `TimeZone` 是不带偏移的 `DATETIME(6)`，读回来补应用时区；那一小时的墙上时间出现两次，读回来一律当第一次（`fold=0`），换算成 UTC 比签名时早一小时 | `chain.signature_matches()`：签名照旧按写入时的真实时刻算（**已有的行一行都不重签、不写迁移**），校验时墙上时间有歧义的话两种读法都认；放宽的只有「同一个墙上时间的两种读法」，别的时间改动照样报 | 真 MySQL 8.4（2026-11-22，一次性容器）：写 `06:30:15 UTC`（01:30 EST，第二次），读回 `01:30:15-04:00` = `05:30:15 UTC`；原来的比对 `False`、新的 `True`。CI 守着的是 `tests/test_timezone_dst.py` 两条（纯 Python 模拟同一个读回值）；变异：去掉第二种读法 → 第一条红 |
+
+⚠️ 没改存储（「MySQL 改成存 UTC」要动全部 99 个时间列和已有数据，而签名本来就是按 UTC 规范化的）。被存歪的只是那一小时
+行的 `created_time` 显示值（早一小时）—— 这是 `TimeZone` 在 MySQL 上本来就有的缺口（`tests/test_timezone_dst.py` 最后那条 xfail），这次只让它不再触发误报。
+PostgreSQL / SQL Server 存偏移，第一种读法就对得上；默认的 `Asia/Shanghai` 没有夏令时，碰不到。

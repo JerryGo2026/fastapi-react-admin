@@ -124,6 +124,34 @@ def sign(prev: str, row: Mapping[str, Any], key: bytes, kid: str) -> str:
     return f'{kid}:{digest}'
 
 
+def _other_reading(created: datetime) -> datetime | None:
+    """`created_time` 的墙上时间在应用时区里有歧义（秋季回拨那一小时出现两次）时，另一种读法；没有歧义返回 None"""
+    from backend.utils.timezone import timezone
+
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.tz_info)
+    wall = created.astimezone(timezone.tz_info)
+    other = wall.replace(fold=1 - wall.fold)
+    return other if other.utcoffset() != wall.utcoffset() else None
+
+
+def signature_matches(prev: str, row: Mapping[str, Any], key: bytes, kid: str, stored: str) -> bool:
+    """签名对不对得上。
+
+    🔴 MySQL + 有夏令时的 `DATETIME_TIMEZONE`（#401）：`created_time` 存成不带偏移的 `DATETIME(6)`，秋季回拨那一小时
+    第二次出现的时刻读回来被当成第一次（早一小时），换算成 UTC 和签名差一小时 —— 那一小时写的行全部报 `modified`。
+    签名照旧按写入时的真实时刻算（已有的行不重签、迁移链不动），校验时墙上时间有歧义的话两种读法都认。
+    放宽的只有「同一个墙上时间的两种读法」：别的时间改动照样对不上。PostgreSQL / SQL Server 存偏移，第一种读法就对得上
+    """
+    if hmac.compare_digest(sign(prev, row, key, kid), stored):
+        return True
+    created = row.get('created_time')
+    if not isinstance(created, datetime):
+        return False
+    other = _other_reading(created)
+    return other is not None and hmac.compare_digest(sign(prev, {**row, 'created_time': other}, key, kid), stored)
+
+
 # ── 写 ──────────────────────────────────────────────────────────────────────
 
 
@@ -369,8 +397,7 @@ def _walk(session: Session, records: sa.Table, head: Mapping[str, Any] | None, f
         else:
             seen_current_key = seen_current_key or row_kid == kid
             # 前面少了几行时，这一行签名里的「上一行」已经不在了，重算不了；缺口已经报过
-            expected = sign(walk.last_hash, row, keys[row_kid], row_kid)
-            if not gap and not hmac.compare_digest(expected, stored):
+            if not gap and not signature_matches(walk.last_hash, row, keys[row_kid], row_kid, stored):
                 found.add(_problem('modified', row))
         walk.last_seq, walk.last_hash, walk.last_kid = row['chain_seq'], stored, row_kid
     return walk

@@ -91,8 +91,14 @@ def test_a_failed_release_does_not_turn_a_finished_init_into_a_crash(
     monkeypatch.setattr(cli.console, 'warning', warnings.append)
 
     async def scenario() -> bool:
-        async with cli.snowflake_node(_other_db_client()):
-            return fresh._initialized
+        redis = _other_db_client()
+        try:
+            async with cli.snowflake_node(redis):
+                return fresh._initialized
+        finally:
+            # 固定节点也在 Redis 里占租约（#401）；放节点被打桩成失败了，自己清掉，否则下一轮要等它过期
+            await redis.delete(f'{settings.SNOWFLAKE_REDIS_PREFIX}:nodes:1:1')
+            await redis.aclose()
 
     assert asyncio.run(scenario()) is True
     assert len(warnings) == 1
