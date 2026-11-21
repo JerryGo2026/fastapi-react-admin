@@ -8,10 +8,11 @@ import { createApiClient, expect, loginPageAs, test } from "../fixtures/base"
  * `workflow.spec.ts`「填到一半切走再切回来」只在默认的**内容区滚动**下验了应用内切换。这里补三块：
  *
  * 1. **两种滚动方式都跑一遍**（偏好 `scrollMode` → `<html data-scroll-mode>`）。整页滚动时滚的是视口本身，
- *    Base UI 模态浮层的滚动锁（`<html data-base-ui-scroll-locked>` + `overflow: hidden`）锁的就是它 ——
+ *    Base UI 模态浮层的滚动锁锁的就是它（两条实现、不一定带属性，见下面 `pageLocked`）——
  *    后台页签里「开着」的抽屉要是还拿着锁，前台那一页滚不动，而且没有任何报错。
- * 2. **整页刷新**：后台页签从 sessionStorage 恢复，`?start=` 还在，抽屉以「打开」挂载 —— 原始 bug 的现场
- *    （shell 分册「开在 URL 上的浮层，portal 要挂进本 tab 的根节点」）。
+ * 2. **整页刷新**：后台页签从 sessionStorage 恢复，`?start=` 还在，但实测抽屉在后台**根本没挂**（portal 节点靠
+ *    effect 建，hidden 的 `<Activity>` 不跑 effect）—— 前半段只守「恢复出来的后台页签不挡前台」；真正守 portal
+ *    容器的是后半段「点回去、再切走」，那才是原始 bug 的现场（shell 分册「开在 URL 上的浮层，portal 要挂进本 tab 的根节点」）。
  * 3. **不该跟着页签走的浮层**：行操作菜单 / 顶栏铃铛照旧挂 `<body>`，贴着滚动区底边打开也完整可见、
  *    在最上层、焦点进出正确，打开关上不改滚动位置。
  *
@@ -24,7 +25,9 @@ const USER = "/_auth/system/user"
 const MODES = ["page", "content"] as const
 type Mode = (typeof MODES)[number]
 
-test.describe.configure({ mode: "serial" })
+// 不用 serial：那样 page 模式红一条，content 模式的三条全被跳过，就看不出「是不是只坏在一种滚动方式」。
+// default = 同一个 worker 里按顺序跑（fullyParallel 下也不拆开，beforeAll 只建一份定义），但互不连坐
+test.describe.configure({ mode: "default" })
 test.use({ viewport: { width: 1280, height: 560 } })
 
 let definitionId = ""
@@ -49,13 +52,17 @@ test.beforeAll(async () => {
     },
   })) as { id: string }
   definitionId = created.id
-  await api.post(`/api/v1/sys/workflow/definitions/${definitionId}/publish`)
+  // publish 校验不过也回 200（`published: false`），不断言的话六条全晚到 `wf-start-sheet` 找不到才红、看不出原因
+  const res = (await api.post(`/api/v1/sys/workflow/definitions/${definitionId}/publish`)) as { published: boolean }
+  expect(res.published).toBe(true)
   await dispose()
 })
 
 test.afterAll(async () => {
+  // 输入会自动存 admin 的服务端草稿，草稿列表不看定义停没停用 —— 不删的话每跑一次往共享库里多留一份
   // 停用：删不掉的定义留着启用的话，会进所有人的「快速发起」
   const { api, dispose } = await createApiClient()
+  await api.del(`/api/v1/sys/workflow/drafts/${CODE}`).catch(() => undefined)
   await api.put(`/api/v1/sys/workflow/definitions/${definitionId}/status`, { enabled: false }).catch(() => undefined)
   await dispose()
 })
@@ -113,7 +120,9 @@ function pageLocked(page: Page): Promise<boolean> {
 /** 前台没被后台浮层拿住：没有滚动锁、自己和祖先都不 inert */
 async function expectFrontFree(page: Page, front: Locator) {
   await expect.poll(() => pageLocked(page), { message: "后台抽屉不该还拿着滚动锁" }).toBe(false)
-  expect(await front.evaluate((el) => !!el.closest("[inert]") || el.closest("[aria-hidden=true]") !== null)).toBe(false)
+  await expect
+    .poll(() => front.evaluate((el) => !!el.closest("[inert]") || el.closest("[aria-hidden=true]") !== null), { message: "前台不该在 inert / aria-hidden 下" })
+    .toBe(false)
 }
 
 /** 前台点得动：开一个行操作菜单再 Esc 关掉（后台抽屉的遮罩还在的话，点击会被它接走、超时） */
@@ -152,7 +161,7 @@ for (const mode of MODES) {
     await page.getByTestId("notification-bell").click()
     const panel = page.getByTestId("notification-panel")
     await expect(panel).toBeVisible()
-    expect(await panel.evaluate((el) => el.closest("[data-tab]") === null)).toBe(true)
+    await expect.poll(() => panel.evaluate((el) => el.closest("[data-tab]") === null)).toBe(true)
     await page.keyboard.press("Escape")
     await expect(panel).toBeHidden()
     await expect(page.getByTestId("notification-bell")).toBeFocused()
@@ -177,7 +186,8 @@ for (const mode of MODES) {
 
     await page.reload()
     await expect(front).toHaveAttribute("data-visible", "true")
-    // 后台页签确实恢复出来了，而且带着 ?start= —— 抽屉在它里面「开着」挂载
+    // 后台页签确实恢复出来了（带着 ?start=）。实测此时抽屉在后台根本没挂（见文件头第 2 条），
+    // 所以下面这段只守「恢复出来的后台页签不挡前台」，portal 容器靠后半段「点回去、再切走」守
     await expect(page.getByTestId(`tab-${INBOX}`)).toBeVisible()
     await expect(page.locator(`[data-tab="${INBOX}"]`)).toHaveAttribute("data-visible", "false")
     await expect(front.locator('[data-testid^="row-actions-"]').first()).toBeVisible()
@@ -237,10 +247,13 @@ for (const mode of MODES) {
       })
       expect(hit, `第 ${i + 1} 项被别的东西盖住了`).toBe(true)
     }
-    // 焦点进了菜单；键盘能走到第一项
-    expect(await menu.evaluate((el) => el.contains(document.activeElement))).toBe(true)
+    // 焦点进了菜单（Base UI 在 effect 里挪焦点，要等）；↓ 之后落在某一项上 —— 打开时焦点在弹层本身，
+    // 只看「在菜单里」的话 ↓ 什么都不做也是绿的
+    await expect.poll(() => menu.evaluate((el) => el.contains(document.activeElement))).toBe(true)
     await page.keyboard.press("ArrowDown")
-    expect(await menu.evaluate((el) => el.contains(document.activeElement))).toBe(true)
+    await expect
+      .poll(() => menu.evaluate((el) => el.contains(document.activeElement) && document.activeElement?.getAttribute("role") === "menuitem"))
+      .toBe(true)
 
     await page.keyboard.press("Escape")
     await expect(menu).toBeHidden()

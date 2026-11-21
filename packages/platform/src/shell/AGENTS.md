@@ -444,7 +444,7 @@ E2E 实测弹窗带着 `data-closed` 在屏幕上停了 5 秒还 visible。
 
 | 浮层 | portal 挂哪 | 后台时 |
 |---|---|---|
-| URL 驱动的抽屉（审批发起 / 详情、公告读者 / 阅读统计、AI 预审统计） | 本 tab 根节点（`useTabPortalContainer`） | 跟着 `display:none`；effect 被 `<Activity>` 销毁 → 滚动锁、inert 一并释放 |
+| URL 驱动的抽屉（审批发起 / 详情、公告读者 / 阅读统计、AI 预审统计） | 本 tab 根节点（`useTabPortalContainer`） | 跟着 `display:none`；effect 被 `<Activity>` 销毁 → 滚动锁、inert 一并释放。⚠️ **只实测了审批「发起」**，其余几个用同一个 hook、行为是推断 |
 | 外壳家具（铃铛面板、帮助 / 用户菜单） | `<body>`（不在任何 tab，context 是 `undefined`） | 不涉及 |
 | 页面里点出来的下拉菜单 / 行操作 | `<body>` | 切走前已关；跳页链接见上一节 |
 
