@@ -19,6 +19,7 @@ from backend.app.admin.schema.role import GetRoleDetail
 from backend.app.admin.schema.user import (
     AddUserParam,
     GetCurrentUserInfoWithRelationDetail,
+    GetMyPasswordStatus,
     GetUserInfoWithRelationDetail,
     ResetPasswordParam,
     UpdateUserParam,
@@ -40,7 +41,7 @@ from backend.common.pagination import DependsPagination, PageData
 from backend.common.response.response_schema import ResponseModel, ResponseSchemaModel, response_base
 from backend.common.schema import CustomPhoneNumber, IanaTimeZone
 from backend.common.security.data_scope import bypass_data_scope
-from backend.common.security.jwt import DependsJwtAuth, DependsSuperUser
+from backend.common.security.jwt import DependsJwtAuth, DependsSuperUser, get_token, jwt_decode
 from backend.common.security.permission import RequestPermission
 from backend.common.security.rbac import DependsRBAC, user_has_perm
 from backend.database.db import CurrentSession, CurrentSessionTransaction
@@ -218,12 +219,25 @@ async def update_user_permission(
     return response_base.fail()
 
 
+@router.get('/me/password-status', summary='获取当前用户的密码状态', dependencies=[DependsJwtAuth])
+async def get_my_password_status(db: CurrentSession, request: Request) -> ResponseSchemaModel[GetMyPasswordStatus]:
+    # 第三方登录建的账号没有密码：个人中心据此显示「设置密码」，并先引导重新第三方授权（#402）
+    session_uuid = jwt_decode(get_token(request)).session_uuid
+    data = await user_service.get_password_status(db=db, user_id=request.user.id, session_uuid=session_uuid)
+    return response_base.success(data=data)
+
+
 @router.put('/me/password', summary='更新当前用户密码', dependencies=[DependsJwtAuth])
 async def update_user_password(
     db: CurrentSessionTransaction, background_tasks: BackgroundTasks, request: Request, obj: ResetPasswordParam
 ) -> ResponseModel:
     count = await user_service.update_password(
-        db=db, background_tasks=background_tasks, user_id=request.user.id, obj=obj
+        db=db,
+        background_tasks=background_tasks,
+        user_id=request.user.id,
+        # 无密码账号第一次设密码：重新授权的凭据只认发起它的会话（#402 评审）
+        session_uuid=jwt_decode(get_token(request)).session_uuid,
+        obj=obj,
     )
     if count > 0:
         return response_base.success()

@@ -245,6 +245,17 @@ class OAuth2Service:
                 )
             return None
 
+        # 重新确认身份（#402）：无密码账号第一次设密码前。不开会话、不动绑定，只记一笔凭据
+        if state_info.get('type') == UserSocialAuthType.reauth.value:
+            user_id = state_info.get('user_id')
+            session_uuid = state_info.get('session_uuid')
+            if not user_id or not session_uuid:
+                raise errors.ForbiddenError(msg=t('error.oauth2.illegal_state_operation'))
+            await user_social_service.reauth_with_oauth2(
+                db=db, user_id=user_id, session_uuid=session_uuid, sid=str(sid), source=social
+            )
+            return None
+
         # 登录流程
         if state_info.get('type') != UserSocialAuthType.login.value:
             raise errors.ForbiddenError(msg=t('error.oauth2.state_invalid'))

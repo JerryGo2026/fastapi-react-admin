@@ -142,12 +142,51 @@ export function useUpdateEmail() {
  * 三个字段都要传，后端自己比对 `new != confirm`；另外还会过
  * `validate_new_password`（长度/复杂度/历史密码复用，策略读的是 `sys_config`）。
  * 所以客户端只做最基本的校验，真正的规则以服务端返回的 msg 为准。
+ *
+ * 没有密码的账号（第三方登录建的）第一次设密码时**不传** `old_password`，
+ * 前提是先完成了 {@link useReauthUrl} 那一趟第三方重新授权（#402），否则后端拒绝。
  */
 export function useUpdatePassword() {
+  // 🔴 成功后**不要**作废 `passwordStatusQuery`（#402 评审）：服务端这时已经撤掉了本人所有会话，
+  // 立刻重取只会 401 → 当场被踢回登录页、看不到「N 秒后跳转」；就算取到了，`has_password` 一翻
+  // 密码块就换了组件，倒计时跟着卸载。倒计时结束本来就 `endSession()`，状态不用刷新
   return useMutation({
     meta: { suppressErrorToast: true },
-    mutationFn: (v: { old_password: string; new_password: string; confirm_password: string }) =>
+    mutationFn: (v: { old_password?: string; new_password: string; confirm_password: string }) =>
       api.PUT<null>('/api/v1/sys/users/me/password', { body: v }),
+  })
+}
+
+export type PasswordStatus = {
+  /** 第三方登录建的账号没有密码 */
+  has_password: boolean
+  /** 第一次设密码前的第三方重新授权完成了、还在有效期内（10 分钟，只能用一次） */
+  reauth_verified: boolean
+}
+
+const passwordStatusKey = ['profile', 'password-status'] as const
+
+/** `GET /sys/users/me/password-status`：决定密码块显示「修改密码」还是「设置密码」（#402） */
+export const passwordStatusQuery = queryOptions({
+  queryKey: passwordStatusKey,
+  queryFn: () => api.GET<PasswordStatus>('/api/v1/sys/users/me/password-status'),
+  retry: false,
+})
+
+/**
+ * 无密码账号第一次设密码前，取「用已绑定的第三方账号重新验证身份」的授权链接（#402）。
+ *
+ * 🔴 为什么要这一步：没有旧密码可验，只凭一个会话就让设密码的话，拿到这个人一枚 access token
+ * 的人就能给他设一个长期有效的密码。后端只认「授权回来的第三方账号正是绑在你名下的那一个」。
+ *
+ * 跳转方式同绑定（顶层跳转，cookie 在后端 authorize 那一跳上下发），但走**当前页**：
+ * 回调完成后后端把人送回 `个人中心?section=security`，页面重新加载、状态里 `reauth_verified` 变 true，
+ * 设置密码的表单直接出现。新开一页的话，原来那页还停在「先验证身份」上。
+ */
+export function useReauthUrl() {
+  return useMutation({
+    meta: { suppressErrorToast: true },
+    mutationFn: (source: SocialSource) => api.GET<string>(`/api/v1/oauth2/me/reauth?source=${source}`),
   })
 }
 
