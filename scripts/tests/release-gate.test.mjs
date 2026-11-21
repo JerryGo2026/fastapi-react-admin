@@ -32,7 +32,7 @@ fs.appendFileSync(path.join(dir, 'calls'), route + '\\n')
 if (cmd !== 'api') process.exit(2)
 if (route.includes('/compare/')) {
   if (s.compare === 'error') { console.error('HTTP 502'); process.exit(1) }
-  process.stdout.write(JSON.stringify({ status: s.compare })); process.exit(0)
+  fs.writeSync(1, JSON.stringify({ status: s.compare, files: 'x'.repeat(s.comparePad || 0) })); process.exit(0)
 }
 if (route.includes('/actions/workflows/ci.yml/runs')) {
   const f = path.join(dir, 'runs-i')
@@ -186,4 +186,18 @@ for (const tag of [
 test("SHA 不是 40 位 → 拦", (t) => {
   const run = setup(t, { compare: "behind", runs: [green] })
   assert.notEqual(run("v1.2.3", "abc1234").status, 0)
+})
+
+// 🔴 分叉 / 领先的提交，compare 会带回最多 250 个提交 + 300 个文件的 patch，轻松过 1 MiB。
+// execFileSync 默认 maxBuffer 是 1 MiB：超了抛 ENOBUFS，闸门照样拦（非零退出），但报的是一屏栈、看不到「先合进 main」
+test("compare 响应超过 1 MiB 时照常报「不在 main 上」，不是 ENOBUFS", (t) => {
+  const run = setup(t, {
+    compare: "diverged",
+    comparePad: 3 * 1024 * 1024,
+    runs: [green],
+  })
+  const r = run("v1.2.3")
+  assert.notEqual(r.status, 0)
+  assert.doesNotMatch(r.stderr, /ENOBUFS/)
+  assert.match(r.stderr, /不在 main 上/)
 })

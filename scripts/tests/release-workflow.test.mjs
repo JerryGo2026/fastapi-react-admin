@@ -50,3 +50,12 @@ test("迁移链守卫取基线 tag 时，远端读失败不能落进「没有 ta
   )
   assert.doesNotMatch(ci, /ls-remote --tags[^\n]*\|\| true/)
 })
+
+// 输出丢了（step id 改名、脚本漏写）时 PRERELEASE 是空串：原来的 `[ "$PRERELEASE" = true ]` 把它当正式版，
+// 预发布 tag 建出一份不带 prerelease 的草稿 —— 正是 #393 要堵的那个洞。只认 true / false，别的一律红
+test("建草稿只认 prerelease=true|false，拿不到闸门输出就失败", () => {
+  const step = release.slice(release.indexOf("- name: 建草稿"))
+  const body = step.slice(0, step.indexOf("\n  build:"))
+  assert.match(body, /case "\$PRERELEASE" in/)
+  assert.match(body, /\*\)[^\n]*exit 1/)
+})

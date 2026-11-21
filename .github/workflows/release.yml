@@ -91,8 +91,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRERELEASE: ${{ steps.gate.outputs.prerelease }}
         run: |
-          FLAG=""
-          if [ "$PRERELEASE" = true ]; then FLAG="--prerelease"; fi
+          # 只认 true / false：闸门的输出丢了（step id 改名、脚本漏写）时这里是空串，
+          # 当成正式版的话预发布 tag 就建出一份不标 prerelease 的草稿
+          case "$PRERELEASE" in
+            true) FLAG="--prerelease" ;;
+            false) FLAG="" ;;
+            *) echo "::error::拿不到闸门的 prerelease 输出（得到「$PRERELEASE」）"; exit 1 ;;
+          esac
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "草稿已存在，复用"
             if [ -n "$FLAG" ]; then gh release edit "$GITHUB_REF_NAME" --prerelease; fi
@@ -189,6 +194,9 @@ jobs:
       # 🔴 证书只给 push（tag）构建（#393）：push 下 build 必须等 prepare 成功，也就是过了上面「在 main 上、CI 绿」
       # 的闸门；workflow_dispatch 跳过了 prepare，在任意未评审分支上点 Run workflow 都能跑到这里。
       # 不门控的话，接上证书那天，试跑就能拿到带正式签名的包。试跑一律出未签名包（下面会 unset 空值）
+      # ⚠️ 这只挡「在别的分支上点一下 Run workflow」这种误用：workflow 文件和闸门脚本都取自被跑的那个 ref，
+      # 能推分支 / tag 的人可以把这几行（或 release-gate.mjs）一起改掉。真要隔离，接证书时把这几个 secret
+      # 放进只允许 v* tag 部署的 GitHub Environment，并给 v* tag 加保护规则 —— 那两样不在仓库里，配证书那天一起做
       - name: 出安装包
         env:
           # Windows / macOS 通用：electron-builder 认这两个（.pfx / .p12）

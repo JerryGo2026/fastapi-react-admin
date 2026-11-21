@@ -62,7 +62,9 @@ TAG=sha-abc1234 bash prod.sh up
 TAG=<旧> bash prod.sh pull
 TAG=<旧> docker compose -f docker-compose.prod.yml run --rm --no-deps migrate \
   sh -c 'cd /app/backend && alembic heads'
-# 2. 看两版之间有哪些迁移，逐个 alembic show <修订号> 读说明
+# 2. 拉新镜像（日常部署拉的是 latest，本地没有 sha- 标签；不先拉，下面的 run 会绕过加速器直连 ghcr.io）
+TAG=<新> bash prod.sh pull
+#    看两版之间有哪些迁移，逐个 alembic show <修订号> 读说明
 TAG=<新> docker compose -f docker-compose.prod.yml run --rm --no-deps migrate \
   sh -c 'cd /app/backend && alembic history -r <旧 head>:head'
 # 3. 停服务，用新镜像降级
@@ -79,7 +81,7 @@ TAG=<旧> bash prod.sh up
 **有些迁移降级时不还原数据，这时要恢复备份。** 只改表结构的迁移能干净降回去；改数据的迁移（加密、清理）downgrade 什么都不做，数据停在新格式。第 2 步读说明时看到「downgrade 什么都不做」「保留密文」就属于这种。比如回到 1.1.0：`at000000configsecret` 已经把参数配置里的密钥加密，降级后仍是密文，1.1.0 读不了，所以要按「停服务 → 恢复升级前的备份 → `TAG=<旧> bash prod.sh up`」做。恢复备份会丢掉升级后新写入的数据。
 :::
 
-已经直接换了旧镜像、站点停了的：先 `TAG=<新> bash prod.sh up` 起回新版，再按上面的步骤做。
+已经直接换了旧镜像、站点停了的：先 `TAG=<新> bash prod.sh pull && TAG=<新> bash prod.sh up` 起回新版，再按上面的步骤做。
 
 详细命令见[部署到服务器](/getting-started/deployment/)。
 

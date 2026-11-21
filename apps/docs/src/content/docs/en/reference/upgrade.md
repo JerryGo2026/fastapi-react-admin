@@ -62,7 +62,9 @@ These two lines **only work when there are no database migrations between the tw
 TAG=<old> bash prod.sh pull
 TAG=<old> docker compose -f docker-compose.prod.yml run --rm --no-deps migrate \
   sh -c 'cd /app/backend && alembic heads'
-# 2. List the migrations in between and read each one with alembic show <revision>
+# 2. Pull the new image (routine deploys pull latest, so the sha- tag isn't local; without this the run below bypasses the mirror and pulls straight from ghcr.io)
+TAG=<new> bash prod.sh pull
+#   List the migrations in between and read each one with alembic show <revision>
 TAG=<new> docker compose -f docker-compose.prod.yml run --rm --no-deps migrate \
   sh -c 'cd /app/backend && alembic history -r <old head>:head'
 # 3. Stop the services and downgrade with the new image
@@ -79,7 +81,7 @@ TAG=<old> bash prod.sh up
 **Some migrations don't restore data on downgrade; then you need the backup.** Schema-only migrations downgrade cleanly; data migrations (encryption, cleanup) have an empty downgrade, so the data stays in the new format. In step 2, a description saying the downgrade does nothing or keeps ciphertext means this case. For example, going back to 1.1.0: `at000000configsecret` has already encrypted the secrets in system config, they stay encrypted after the downgrade, and 1.1.0 can't read them — so stop the services, restore the pre-upgrade backup, then `TAG=<old> bash prod.sh up`. Restoring the backup loses anything written after the upgrade.
 :::
 
-If you already switched to the old image and the site is down: bring the new version back with `TAG=<new> bash prod.sh up`, then follow the steps above.
+If you already switched to the old image and the site is down: bring the new version back with `TAG=<new> bash prod.sh pull && TAG=<new> bash prod.sh up`, then follow the steps above.
 
 All commands are in [Deploying to a server](/en/getting-started/deployment/).
 

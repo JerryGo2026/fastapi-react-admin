@@ -148,6 +148,14 @@ A 输出 false、B 输出 true；删除远端 main、远端不可达、SHA 非�
 - `release-workflow.test.mjs` 3 条核对接线（五个签名 secret 都按事件门控、prepare 调了脚本并用它的输出、ci.yml 不再 `|| true`）；改 workflow 之前 3 条全红
 - `actionlint`（v1.7.12，docker）：本次改动的步骤无告警；剩下两条 SC2086 info 是原有的（「出安装包」的 `$EXTRA`、ci.yml 里另一步），main 上同样报
 - 对真远端跑 `node scripts/latest-release-tag.mjs` → `v1.1.3`
+- 评审跟进（2026-11-22）：
+  - 「建草稿」只认 `prerelease=true|false`，其余（闸门输出丢了是空串）直接红 —— 原来 `[ "$PRERELEASE" = true ]` 把空串当正式版，
+    预发布 tag 照样建出不标 prerelease 的草稿，#393 的洞换个入口又开了。`release-workflow.test.mjs` 先红后绿
+  - `gh api` 的 `maxBuffer` 放大到 256 MiB：不在 main 上的提交，compare 带回几百个提交 + 文件 patch，超过默认 1 MiB 抛 ENOBUFS。
+    照样拦，但报的是一屏栈、看不到「先合进 main」。测试造 3 MiB 的 compare 响应：去掉 maxBuffer → stderr 里是 ENOBUFS（红）。
+    ⚠️ 假 `gh` 吐大响应要用 `fs.writeSync(1, …)`：`process.stdout.write` 后紧跟 `process.exit` 在管道上会截断，测试报的就成了 JSON 解析错
+  - 🔴 **签名 secret 的事件门控只挡误用**：workflow 文件和 `release-gate.mjs` 都取自被跑的那个 ref，能推分支 / tag 的人可以连门控一起改掉
+    （原来的 bash 闸门也一样）。真隔离要 GitHub Environment（只放 `v*` tag）+ tag 保护规则，都不在仓库里，配证书那天一起做
 - ⚠️ **没验的**：真打一次预发布 tag 走完 release.yml（会建草稿、出包，按要求没打）；workflow_dispatch 下证书确实为空，要等配了证书才看得到
 
 ## ⚠️ 试过并否掉：把 `dead-path` 扩到**代码注释**

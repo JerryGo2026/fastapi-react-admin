@@ -26,9 +26,15 @@ function fail(message) {
 
 function api(route) {
   // 不用 `gh api --jq`：解析放在这里，测试只需要一个回 JSON 的假 gh。
-  // gh 非零退出 → execFileSync 抛错 → 进程非零退出，绝不当成放行
+  // gh 非零退出 → execFileSync 抛错 → 进程非零退出，绝不当成放行。
+  // maxBuffer 要放大：不在 main 上的提交，compare 会带回几百个提交和文件 patch，超过默认 1 MiB 就是 ENOBUFS ——
+  // 照样拦，但报的是一屏栈、看不到「先合进 main」（评审跟进，#393）
   return JSON.parse(
-    execFileSync("gh", ["api", route], { encoding: "utf8", timeout: 60_000 })
+    execFileSync("gh", ["api", route], {
+      encoding: "utf8",
+      timeout: 60_000,
+      maxBuffer: 256 * 1024 * 1024,
+    })
   )
 }
 

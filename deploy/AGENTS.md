@@ -400,6 +400,10 @@ migrate 容器退出码非零，api / worker 不启动、依赖 api healthy 的 
 命令全用 compose 自带的 `docker compose -f docker-compose.prod.yml run --rm --no-deps migrate sh -c '…'`，不往 `prod.sh` 加新子命令 ——
 `prod.sh` 不给传额外参数是刻意的（`down` 永远不带 `-v`）。降级前先 `prod.sh down`：降级会删新加的列，新版代码边跑边被删就是一段 500。
 
+🔴 **第一次用 `TAG=<新>` 起容器之前要先 `TAG=<新> bash prod.sh pull`**（评审跟进）。日常部署拉的是 `latest`，本地没有 `sha-<短 SHA>` 标签的镜像；
+`docker compose run` 找不到就直连 `ghcr.io` 去拉，**绕过 `FBA_PULL_MIRROR`**，国内机器在第 3 步（站点已经 down）卡在几十 KB/s。
+「已经停了就 `TAG=<新> up` 起回去」那句同理。`scripts/tests/rollback-docs.test.mjs` 核对三份回滚文档的顺序（改前三条全红）。
+
 ⚠️ **downgrade 是空函数的数据迁移降不回去**（`at000000configsecret` 加密、`ar000000smsoptcreds` / `aq000000operalogsecret` 清理凭据、
 `ap000000logretention` 改默认值）。结构回到了旧版，数据停在新格式；其中密钥加密那条会让旧版读到 `enc:v1:` 密文，只能恢复备份。
 文档让人用 `alembic history -r <旧 head>:head` + `alembic show <修订号>` 读说明去判断，因为迁移文件头都写了 downgrade 做不做事。
