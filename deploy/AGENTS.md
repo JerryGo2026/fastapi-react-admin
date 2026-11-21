@@ -424,3 +424,39 @@ migrate 容器退出码非零，api / worker 不启动、依赖 api healthy 的 
 ⚠️ **没验的**：真镜像里跑这串 compose 命令（只用 `docker compose --dry-run run … migrate sh -c 'cd /app/backend && alembic heads'`
 确认了 compose 能按 `TAG` 解析出镜像、建出 run 容器；`Dockerfile.prod` 没有 ENTRYPOINT、`WORKDIR /app`，`cd /app/backend` 是按它推的）；
 「compose 先 create 再 start、旧容器在 create 阶段就被换掉」那条也没在服务器上复现。旧版读到密文后 SMTP 发不出去是推断（1.1.0 没有解密代码）。
+
+## 🔴 `/uploads/` 不能写 `expires`：它会改写预签名跳转的缓存头（#406）
+
+### 症状
+
+默认存储是私有 S3（没配 `public_base_url`）时，头像和富文本里的内联图**第一次能看，5 分钟后裂图**，S3 回 403。
+**只在生产的 nginx 后面出现**，开发环境走 vite 代理不复现。
+
+### 根因
+
+`apps/web/nginx.conf` 的 `location /uploads/` 原来写着 `expires 30d` + `add_header Cache-Control "public"`。
+nginx 的 `expires` 对 200 **和 302** 都生效，而且是**替换**上游的 `Cache-Control`。后端给预签名跳转的是
+`private, max-age=<有效期/2>`（默认有效期 300 秒，`uploads.py` 里那行注释正是在防「缓存比签名活得久」），
+过了 nginx 变成 30 天：浏览器之后一直沿着缓存的 302 去请求早已过期的签名地址。
+本地存储那条「最多一天」（删掉的头像别在别人浏览器里挂一年）也被顶成了 30 天。
+
+### 修法
+
+`/uploads/` 去掉 `expires` 和 `add_header Cache-Control`，缓存头**由后端定、原样透传**。
+`/assets/` 的 `expires 1y` + `immutable` 不动 —— 那是带 hash 的静态产物。
+⚠️ 以后给任何反代到后端的 `location` 加缓存指令之前，先问一句：后端在这条路上有没有自己设 `Cache-Control`、
+有没有 302。有的话 nginx 这一层不要碰。
+
+**实测证据**（2026-11-21，`deploy/tests/test_forwarded_proto.py`，起真 nginx 容器，镜像取 `apps/web/Dockerfile` 的 `FROM`；
+桩后端照 `uploads.py` 下发同样的头）：
+
+| 请求 | 修前 | 修后 |
+|---|---|---|
+| `/uploads/…` 302 预签名（上游 `private, max-age=150`） | `Cache-Control: max-age=2592000` + `Cache-Control: public` + `Expires` | 原样 `private, max-age=150`，无 `Expires` |
+| `/uploads/…` 200 本地（上游 `public, max-age=86400`） | 同上，被顶成 30 天 | 原样，无 `Expires` |
+| `/assets/app-abc123.js` | `max-age=31536000` + `public, immutable` | 不变 |
+
+修前上游那条 `private, max-age=150` 是**整个被丢掉**，不是并存；`Expires` 是请求时刻 + 30 天。
+修前前两条红、第三条绿；修后 4 条（连同原有的转发协议那条）全过。这个文件本来就在 CI 的 `nginx forwarded protocol` job 里。
+⚠️ **没验的**：真 S3 + 浏览器里等满 5 分钟看图还在不在；生产外面还套着一层宝塔 nginx，那一层要是也配了缓存规则会再改写一次 ——
+上线后在域名上 `curl -I https://<域名>/uploads/<某张私有 S3 图的 key>` 看 `Cache-Control` 是不是 `private, max-age=…`。
