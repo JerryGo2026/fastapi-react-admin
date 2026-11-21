@@ -40,6 +40,8 @@ export const IPC = {
 
   updaterCheck: 'updater:check',
   updaterQuitAndInstall: 'updater:quit-and-install',
+  /** 已下载、等安装的版本（没有是 null）—— 渲染层挂上监听时补问一次，事件可能早就发过了 */
+  updaterDownloaded: 'updater:downloaded',
   /** 主进程 → 渲染层 */
   updaterEvent: 'updater:event',
 } as const
@@ -325,7 +327,10 @@ export interface DesktopBridge {
   }
   updater: {
     check(): Promise<void>
+    /** 退出并静默装上已下载的更新；更新器不可用时 reject */
     quitAndInstall(): Promise<void>
+    /** 已下载、等安装的版本；没有是 null */
+    downloaded(): Promise<string | null>
     on(handler: (event: UpdaterEvent) => void): () => void
   }
 }

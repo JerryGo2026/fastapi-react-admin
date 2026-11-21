@@ -8,6 +8,7 @@ import { installActivityTracker } from "@admin/platform/auth/activity"
 import { isSessionEndReason } from "@admin/platform/auth/session"
 import { installVersionWatch } from "@/lib/app-version"
 import { useApplyPreferences } from "@admin/platform/shell/use-apply-preferences"
+import { DesktopUpdatePrompt } from "@admin/platform/shell/desktop-update-prompt"
 import { toast, Toaster } from "@admin/ui/components/toast"
 import { createAppRouter } from "@/router"
 
@@ -74,6 +75,8 @@ export function App() {
       {/* Toaster 包在最外层：非组件代码（mutation / api-client）也能弹提示 */}
       <Toaster>
         <RouterProvider router={router} />
+        {/* 桌面端「已下载，重启更新」（#437）：挂在根上，登录页也要看得到；浏览器里渲染为空 */}
+        <DesktopUpdatePrompt />
       </Toaster>
     </QueryClientProvider>
   )

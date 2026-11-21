@@ -137,4 +137,34 @@ schema 必填 `str` → ValidationError → 事务回滚。🔴 自助那条同�
 有密码照样拿到链接 · 并发解绑两条都成功、剩 0 行（结果 `[1, 1]`，测试里让两个事务都数完再往下走）。
 E2E 新增 2 条，前端改动撤掉后两条都红（凭据过期那条找不到重新验证按钮 · 设完密码那条倒计时不见了）。
 
-⚠️ 凭据在写库之前就 `GETDEL` 了：之后提交失败（库抖动）凭据也没了，要重走一遍授权 —— 只是多跳一次，没修。
+⚠️ ~~凭据在写库之前就 `GETDEL` 了~~ —— #437 修了，见下一节。
+
+## 🔴 设密凭据写库成功之后才消费，并发照样只能用一次（#437）
+
+**症状**：无密码账号重新授权回来、提交新密码时库抖了一下（写库报错 / 提交失败），凭据已经被消费，
+页面退回「先验证身份」，用户要再跳一遍第三方授权。
+
+**根因**：`update_password` 在写库**之前** `GETDEL`。GETDEL 换来了「两个并发请求只有一个拿得到」，代价是之后任何失败都把凭据烧掉。
+直接挪到写库之后（看一眼还在 → 写 → 删）又开了并发窗口：两个请求都看到「还在」、都写进去。
+
+**修法**（`app/admin/utils/password_set_grant.py` 的 `held()`，包住写密码那几句）：
+另一把 key 上 `SET NX EX 30` **占位**（并发只有一个占得到，凭据本身不动）→ 写库 + `flush` →
+里面抛错就比对 token 删占位（Lua）；**提交**那一步失败 service 里的 try 看不到，靠挂在会话最外层
+`after_soft_rollback` 上的钩子派协程删占位；提交成功由后台任务（`CurrentSessionTransaction` 先提交、后台任务后跑、回滚不跑）
+把凭据和占位一起删。占位回写都失败了最多卡 30 秒；提交成功后 `password` 已非 NULL，凭据那条分支走不到，`finish` 没跑成也用不了第二次。
+
+- ⚠️ **钩子里不能 `sa_event.remove` 自己**：派发途中改监听列表 → `RuntimeError: deque mutated during iteration`
+  （第一版就这么写的，「写库失败」那条当场 500），改成 `fired` 标记
+- ⚠️ 单去掉 service 里的同步回写**不红**：写库报错也会走到会话回滚，钩子兜住了（两道互为兜底，前者同步、后者管提交失败）
+
+**实测证据**（2026-11-22，PostgreSQL 私有库 + 一次性 Redis）：`test_passwordless_set_password.py` 新增 3 条 ——
+「写库失败凭据还在」「提交失败凭据还在」修之前红（`reauth_verified` 变 false、重试被拒）；「并发两个只成一个」修之前绿（GETDEL 本来就原子），
+是给「挪到写库之后」上的守卫：占位去掉 `nx=True` → 当场红（`assert 2 == 1`，两个都 200）。去掉回滚钩子 →「提交失败」那条红（「凭据一直卡在使用中」）。
+oauth2 全部 49 条 + 会话撤销 / 用户快照 / i18n 共 64 条绿。
+
+## 绑定 / 重新验证的落地地址用 URL 解析设参数（#437）
+
+`profile_security_url()` 原来是 `base + ('&' if '?' in base else '?') + 'section=security'`：配置里已带 `section=info`
+时拼出两个 `section`（前端读第一个，落错面板）；带 `#top` 时参数跑进 hash 后面、路由读不到。现在 `urlsplit` + `parse_qsl`
+去掉同名参数再设；hash 路由形状（`#/profile`）把参数设进 hash 里。
+**实测证据**：`test_profile_security_url_sets_the_section_by_parsing` 7 组，修之前 4 组红（`section=info` 两种 · `#top` 两种）。

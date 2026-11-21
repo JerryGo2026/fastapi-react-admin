@@ -24,6 +24,14 @@ type Emit = (event: UpdaterEvent) => void
 let wired = false
 /** 最近一次经 `error` 事件报出去的错误：electron-updater 失败时既发事件又 reject，catch 里据此去重 */
 let lastEmittedError: unknown = null
+/** 上一次检查有没有用 `setFeedURL` 覆盖成 updateUrl —— 清空时要撤掉 */
+let feedOverridden = false
+/** 已下载、等安装的版本。渲染层可能晚于 `downloaded` 事件才挂上监听（登录页刷新 / 整页重载），挂上时来问一次 */
+let downloaded: string | null = null
+
+export function downloadedVersion(): string | null {
+  return downloaded
+}
 
 async function getUpdater() {
   // 开发模式没有 app-update.yml,强跑只会报一句误导人的错
@@ -46,8 +54,21 @@ async function getUpdater() {
   const autoUpdater = mod.autoUpdater ?? mod.default?.autoUpdater
   if (!autoUpdater) return null
   const { updateUrl } = readConfig()
-  // 填了就覆盖成内网源；没填就**不动 feed**，用打包时写进 app-update.yml 的那个
-  if (updateUrl) autoUpdater.setFeedURL({ provider: "generic", url: updateUrl })
+  // 填了就覆盖成内网源；没填就用打包时写进 app-update.yml 的那个
+  if (updateUrl) {
+    autoUpdater.setFeedURL({ provider: "generic", url: updateUrl })
+    feedOverridden = true
+  } else if (feedOverridden) {
+    /*
+     * 🔴 运行中把 updateUrl 清空要**主动**撤掉覆盖（#437）。autoUpdater 是单例，`setFeedURL` 设进去的源
+     * 一直留着 —— 原来「没填就不动 feed」在冷启动时对、在运行中清空时等于继续用上一个内网源，要重启才回落。
+     * electron-updater 6.8 没有「恢复默认源」的公开方法；`updateConfigPath` 的 setter 会清掉 `clientPromise`、
+     * 置空后下次检查按 `app.appUpdateConfigPath` 重新读 app-update.yml（AppUpdater.js 的 setter / loadUpdateConfig）。
+     * 它在 d.ts 里标着 test only —— 升级 electron-updater 时跑一遍 `tests/updater.test.ts` 并核对这两处源码
+     */
+    ;(autoUpdater as unknown as { updateConfigPath: string | null }).updateConfigPath = null
+    feedOverridden = false
+  }
   autoUpdater.autoDownload = true
   // 下载完不要自动重启 —— 自助终端正在给用户办业务时弹重启是事故
   autoUpdater.autoInstallOnAppQuit = true
@@ -71,7 +92,10 @@ export async function checkForUpdates(emitRaw: Emit): Promise<void> {
     updater.on("update-available", (i) => emit({ kind: "available", version: i.version }))
     updater.on("update-not-available", () => emit({ kind: "not-available" }))
     updater.on("download-progress", (p) => emit({ kind: "progress", percent: p.percent }))
-    updater.on("update-downloaded", (i) => emit({ kind: "downloaded", version: i.version }))
+    updater.on("update-downloaded", (i) => {
+      downloaded = i.version
+      emit({ kind: "downloaded", version: i.version })
+    })
     updater.on("error", (e) => {
       lastEmittedError = e
       emit({ kind: "error", message: e.message })
@@ -158,5 +182,7 @@ export async function quitAndInstall(): Promise<void> {
    *   Update installer has already been triggered. Quitting application.
    * 之后 exe 仍然是旧版本 —— 安装器起来了，停在向导上。
    */
-  updater?.quitAndInstall(true, true)
+  // 拿不到更新器就抛：渲染层「重启更新」按钮据此显示失败（硬纪律 9），而不是点了没反应
+  if (!updater) throw new Error("更新器不可用（开发模式或包里没有 app-update.yml）")
+  updater.quitAndInstall(true, true)
 }

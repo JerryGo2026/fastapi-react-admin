@@ -8,7 +8,7 @@ import { readConfig, writeConfig } from "./config"
 import { syncLoginItem } from "./login-item"
 import { listDevices, onDeviceEvent, simulateDevice, startDevice, stopDevice } from "./devices/registry"
 import { listPrinters, printHtml, printHtmlToPdf } from "./print"
-import { checkForUpdates, quitAndInstall } from "./updater"
+import { checkForUpdates, downloadedVersion, quitAndInstall } from "./updater"
 
 /** 主进程 → 所有窗口的单向广播 */
 export function broadcast(channel: string, payload: unknown): void {
@@ -64,4 +64,5 @@ export function registerIpc(appInfo: () => unknown): void {
 
   ipcMain.handle(IPC.updaterCheck, () => checkForUpdates((e) => broadcast(IPC.updaterEvent, e)))
   ipcMain.handle(IPC.updaterQuitAndInstall, () => quitAndInstall())
+  ipcMain.handle(IPC.updaterDownloaded, () => downloadedVersion())
 }
