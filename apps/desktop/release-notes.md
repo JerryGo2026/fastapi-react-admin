@@ -38,5 +38,6 @@
 
 默认读这个仓库的 Release。内网部署（客户出不去公网）可以在客户机的 `config.json` 里
 填 `updateUrl`，指向自己的静态目录 —— **不用为内网单独打一版**。
+不想让某台机器自动升级（要钉版本），在它的 `config.json` 里写 `"autoUpdate": false`。
 
 ---

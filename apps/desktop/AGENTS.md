@@ -377,3 +377,24 @@ false 分支什么都不做；另外 Electron 的 `setLoginItemSettings` 在 **L
 失败日志 `[desktop] 检查更新失败: App version is not a valid semver version: "0.0"`，进程没崩；改成 `false` 再启动，文件被删掉。
 **没实测**：打包后的安装包、Windows 注册表 Run 键 / macOS 登录项的真实增删、对真 `latest.yml` 查到并下载新版本。
 
+**评审跟进（2026-11-22）**，五处都是「不报错、只是没生效」：
+
+- 🔴 **AppImage 自动更新一次之后开机自启就失效**：发布的 AppImage 名字里带版本号，electron-updater 的 `AppImageUpdater`
+  装新版时**删掉旧文件、按新包名落地**（发 `appimage-filename-updated`），autostart 的 `Exec` 还指着旧路径 ——
+  下次开机应用起不来，「每次启动重写」也就没机会跑。`updater.ts` 监听这条事件，`autoLaunch` 为 true 时用新路径重写。
+- 🔴 **下游沿用 `publish` 段会被装上本模板的版本**：有了定时检查，没填 `updateUrl` 的客户机会去拉 `electron-builder.yml`
+  里那个 GitHub 仓库的 Release。加了 `config.json` 的 `autoUpdate`（缺省 true；`false` 关掉定时检查，手动检查不受影响，每轮现读），
+  并在 `publish` 段注明下游要改 owner / repo。
+- `Exec` 转义要**两层**：先按引号规则给 `"` `` ` `` `$` `\` 加反斜杠，再按 string 类型规则把反斜杠整体翻倍（规范原文：字面反斜杠写四个）；
+  `%` 写成 `%%`。只转一层时 GLib 把 `\"` 当非法转义。
+- 手改出来的 `"autoLaunch": "false"` 是 truthy：Linux 上反着写出 autostart，Windows / macOS 上 `setLoginItemSettings` 抛错（被接住，登录项撤不掉）。
+  `syncLoginItem` 一律按 `=== true` 判。
+- 失败去重：electron-updater 的 `checkForUpdates` 失败时**先发 `error` 事件再 reject 同一个对象**，监听和 catch 都报的话每次失败两条日志、两条事件；
+  catch 里只报监听没见过的那个。
+
+**实测证据**：`tests/lifecycle.test.ts` 新增 4 条、加强 1 条（失败只报一次），在评审前的代码上这 5 条全红，修复后桌面端 25 条全绿。
+**没实测**：`AppImageUpdater.doInstall` 的换名逻辑是读 electron-updater 6.8.x 源码（`AppImageUpdater` 的 `doInstall`）得来的，没在真 AppImage 上跑过一次更新。
+转义拿 GLib 2（PyGObject 的 `GLib.KeyFile` + `GLib.shell_parse_argv`）实测过：路径 `/opt/100%/a\b "x" $y.AppImage`，
+旧写法 `get_string("Exec")` 直接报 `value that cannot be interpreted`；新写法还原出单个参数 `/opt/100%%/a\b "x" $y.AppImage`
+（`%%` → `%` 是启动器展开字段码那一步做的，这里没覆盖）。只含空格的路径两种写法都对，所以 PR 里「带空格的假路径」那次实测没撞到。
+

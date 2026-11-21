@@ -123,6 +123,9 @@ nsis:
 # （草稿不按 tag 去重）—— 实测 v0.0.1-rc.1 当场劈成两个：一个只有 blockmap，
 # 另一个有 exe + latest.yml，而那次运行还是「成功」。
 # 留着这一段是为了让 electron-builder ① 生成 latest.yml ② 把 app-update.yml 打进包里。
+# 🔴 **下游项目发自己的包前把 owner / repo 改成自己的仓库。** 主进程会定时自动检查更新（#428），
+#   沿用这里的话，你的客户机会去拉**本模板**的 Release 并在退出时装上。
+#   还没准备好自己的发布源时，在客户机 config.json 里写 `"autoUpdate": false`。
 publish:
   provider: github
   owner: yile2020

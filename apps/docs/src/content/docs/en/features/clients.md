@@ -45,7 +45,7 @@ Measured while building the shell: `print()` takes `pageSize` in microns, while 
 
 ## How does the desktop app update itself?
 
-It uses `electron-updater`. The feed is `updateUrl` from `config.json` if set (a "generic" source: any static HTTP directory, e.g. on a customer's intranet). Otherwise it is the `app-update.yml` baked in at build time, which points at this repo's GitHub Releases. Updates download automatically and install when the app quits. `quitAndInstall(true, true)` installs silently and relaunches; without those flags the NSIS wizard opens and waits for a click. The renderer drives it through `desktop().updater.check()`, `.on()` and `.quitAndInstall()`. The web app doesn't call `check()` by itself, so add a button or a startup call in your app.
+It uses `electron-updater`. The feed is `updateUrl` from `config.json` if set (a "generic" source: any static HTTP directory, e.g. on a customer's intranet). Otherwise it is the `app-update.yml` baked in at build time, which points at this repo's GitHub Releases. Updates download automatically and install when the app quits. `quitAndInstall(true, true)` installs silently and relaunches; without those flags the NSIS wizard opens and waits for a click. The renderer drives it through `desktop().updater.check()`, `.on()` and `.quitAndInstall()`. Packaged Windows and Linux builds check on their own from the main process (30 s after start, then every 4 hours; set `autoUpdate: false` to turn it off). The unsigned macOS build doesn't check automatically.
 
 | Platform | Auto-update |
 |---|---|
@@ -90,6 +90,7 @@ To run it: `pnpm --filter api dev:host` (backend on `0.0.0.0:8088`), then `pnpm 
 | Desktop | same | `kiosk` | `false` | Full-screen kiosk mode |
 | Desktop | same | `autoLaunch` | `false` | Start at login (packaged builds only) |
 | Desktop | same | `updateUrl` | empty | Auto-update feed; empty = GitHub Releases |
+| Desktop | same | `autoUpdate` | `true` | Scheduled update checks from the main process (Windows / Linux: 30 s after start, then every 4 h); `false` turns them off, manual checks still work |
 | Mobile | The server address setting in the app, stored on the device | — | Build-time `EXPO_PUBLIC_API_BASE`, or `http://127.0.0.1:8088` if unset | Probes `/auth/captcha` before saving to confirm it is reachable. `EXPO_PUBLIC_*` is replaced at build time, so after packaging the address can only be changed in the app |
 
 ## Where it lives in the code
