@@ -10,6 +10,7 @@
 在它身上测「挤人 / 停用 / 改密码」会把别的用例的会话一起带走。
 """
 
+import asyncio
 import secrets
 import time
 
@@ -441,3 +442,157 @@ def test_socket_presence_uses_the_session_from_the_token(client: TestClient, acc
         assert bound == a.sid
     finally:
         client.portal.call(disconnect, socket_id)
+
+
+# ─── socket：在线状态的 key 自己会过期（#401） ─────────────────────────────────────
+# 🔴 原来 `fba:token_online*` 三类 key 都没有 TTL，只靠 `disconnect` 回调清、启动时也不清：进程被 SIGKILL（OOM、
+# `docker kill`）之后当时连着的 sid 永久残留，「在线用户」页一直显示在线。现在每个 key 带 TTL，本进程的心跳续期
+
+
+def _ttl(client: TestClient, key: str) -> int:
+    return client.portal.call(redis_client.ttl, key)
+
+
+def _connect(client: TestClient, login: Login) -> str:
+    from backend.common.socketio.server import connect
+
+    socket_id = f'pytest-{secrets.token_hex(4)}'
+    assert client.portal.call(connect, socket_id, {}, {'token': login.headers['Authorization'][7:]}) is True
+    return socket_id
+
+
+def _status(client: TestClient, token_headers: dict[str, str], sid: str) -> int:
+    return {row['session_uuid']: row for row in _online(client, token_headers)}[sid]['status']
+
+
+def test_socket_presence_keys_expire_on_their_own(
+    client: TestClient, token_headers: dict[str, str], account: int
+) -> None:
+    from backend.common.socketio.server import disconnect
+
+    prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
+    a = _login(client)
+    socket_id = _connect(client, a)
+    try:
+        for key in (f'{prefix}:sid:{socket_id}', f'{prefix}:session:{a.sid}'):
+            assert 0 < _ttl(client, key) <= settings.TOKEN_ONLINE_TTL_SECONDS
+        assert _status(client, token_headers, a.sid) == 1
+    finally:
+        client.portal.call(disconnect, socket_id)
+    assert _status(client, token_headers, a.sid) == 0
+
+
+def test_a_killed_process_leaves_no_session_online(
+    client: TestClient, token_headers: dict[str, str], account: int
+) -> None:
+    """进程被杀：没人调 `disconnect`、也没人续期，key 过期之后（这里直接删掉模拟）在线用户页就要显示离线"""
+    from backend.common.socketio import server
+
+    prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
+    a = _login(client)
+    socket_id = _connect(client, a)
+    assert _status(client, token_headers, a.sid) == 1
+    server._local_sids.pop(socket_id, None)  # 这个进程「死了」：它的连接表跟着没了
+    client.portal.call(redis_client.delete, f'{prefix}:sid:{socket_id}', f'{prefix}:session:{a.sid}')
+    assert _status(client, token_headers, a.sid) == 0
+
+
+def test_the_heartbeat_puts_back_presence_lost_with_redis(
+    client: TestClient, token_headers: dict[str, str], account: int
+) -> None:
+    """Redis 重启丢了 key：本进程的连接还在，下一拍心跳要把它们写回来、续上 TTL"""
+    from backend.common.socketio import server
+
+    prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
+    a = _login(client)
+    socket_id = _connect(client, a)
+    try:
+        client.portal.call(redis_client.delete, f'{prefix}:sid:{socket_id}', f'{prefix}:session:{a.sid}')
+        assert _status(client, token_headers, a.sid) == 0
+        client.portal.call(server.refresh_presence)
+        assert _status(client, token_headers, a.sid) == 1
+        assert 0 < _ttl(client, f'{prefix}:sid:{socket_id}') <= settings.TOKEN_ONLINE_TTL_SECONDS
+    finally:
+        client.portal.call(server.disconnect, socket_id)
+
+
+def test_disconnect_drops_sids_left_by_dead_processes(
+    client: TestClient, token_headers: dict[str, str], account: int
+) -> None:
+    """同一个会话里混着一个死进程留下的 sid（它的 sid key 已过期）：活着的那条断开后，会话不能因为它还挂着就显示在线"""
+    from backend.common.socketio.server import disconnect
+
+    prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
+    a = _login(client)
+    socket_id = _connect(client, a)
+    client.portal.call(redis_client.sadd, f'{prefix}:session:{a.sid}', 'ghost-sid-from-a-dead-process')
+    client.portal.call(disconnect, socket_id)
+    assert client.portal.call(redis_client.exists, f'{prefix}:session:{a.sid}') == 0
+    assert _status(client, token_headers, a.sid) == 0
+
+
+def test_startup_gives_leftover_presence_keys_a_ttl(client: TestClient) -> None:
+    """升级之前留下的、没有 TTL 的在线 key：启动时补上 TTL；不再使用的全站集合直接删掉"""
+    from backend.common.socketio.server import sweep_presence_keys
+
+    prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
+    leftover = f'{prefix}:sid:pytest-leftover-{secrets.token_hex(4)}'
+    client.portal.call(redis_client.set, leftover, 'some-session')
+    client.portal.call(redis_client.sadd, prefix, 'some-session')
+    try:
+        assert _ttl(client, leftover) == -1
+        client.portal.call(sweep_presence_keys)
+        assert 0 < _ttl(client, leftover) <= settings.TOKEN_ONLINE_TTL_SECONDS
+        assert client.portal.call(redis_client.exists, prefix) == 0
+    finally:
+        client.portal.call(redis_client.delete, leftover)
+
+
+def test_a_connect_that_fails_to_mark_presence_is_not_kept_alive_by_the_heartbeat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 评审发现：`connect` 先把 sid 记进本进程的连接表、再写 Redis。写 Redis 抛了（超时 / 抖动）→ 握手被拒，
+    socketio 不会为它调 `disconnect` → 那个 sid 永远留在连接表里，心跳每 30 秒把它写回 Redis ——
+    正是要消灭的「永久在线」。写成功之后才记进连接表"""
+    from backend.common.socketio import server
+
+    socket_id = f'pytest-{secrets.token_hex(4)}'
+
+    async def broken_mark(*_: object) -> None:
+        await asyncio.sleep(0)
+        raise ConnectionError('Redis timeout')
+
+    monkeypatch.setattr(server, '_mark_online', broken_mark)
+    with pytest.raises(ConnectionError):
+        client.portal.call(
+            server.connect, socket_id, {}, {'token': settings.WS_NO_AUTH_MARKER, 'session_uuid': 'pytest-ghost'}
+        )
+    assert socket_id not in server._local_sids
+
+
+def test_the_heartbeat_does_not_resurrect_a_socket_that_disconnected_mid_sweep(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, account: int
+) -> None:
+    """心跳遍历的是连接表的快照、每个 sid 一次 await：遍历途中断开的连接，不能被后面那次续期写回来"""
+    from backend.common.socketio import server
+
+    prefix = settings.TOKEN_ONLINE_REDIS_PREFIX
+    a = _login(client)
+    first = _connect(client, a)
+    second = _connect(client, a)
+    real_mark = server._mark_online
+
+    async def mark_then_disconnect_the_other(sid: str, session_uuid: str) -> None:
+        await real_mark(sid, session_uuid)
+        if sid == first:
+            await server.disconnect(second)  # 心跳正 await 第一个 sid 的时候，第二条连接断开
+
+    try:
+        monkeypatch.setattr(server, '_mark_online', mark_then_disconnect_the_other)
+        client.portal.call(server.refresh_presence)
+        monkeypatch.setattr(server, '_mark_online', real_mark)
+        assert client.portal.call(redis_client.exists, f'{prefix}:sid:{second}') == 0
+    finally:
+        monkeypatch.setattr(server, '_mark_online', real_mark)
+        client.portal.call(server.disconnect, first)
+        client.portal.call(server.disconnect, second)

@@ -16,9 +16,11 @@ from backend.database.redis import redis_client
 from backend.utils.dynamic_config import load_user_security_config
 from backend.utils.timezone import timezone
 
+# 计数 + 过期时间一步完成（账号维度 #311、IP 维度 #401）。不只在 `count == 1` 时设过期：
+# 旧代码两步之间断掉留下的「没有 TTL」的计数，下一次失败顺手补上，不用手工 DEL
 _INCREMENT_LOGIN_FAILURE = """
 local count = redis.call('INCR', KEYS[1])
-if count == 1 then
+if count == 1 or redis.call('TTL', KEYS[1]) < 0 then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 end
 return count
@@ -97,9 +99,9 @@ class UserPasswordHistoryService:
         if settings.LOGIN_IP_LOCK_THRESHOLD == 0:
             return
         key = f'{settings.LOGIN_IP_FAILURE_PREFIX}:{ip}'
-        count = await redis_client.incr(key)
-        if count == 1:
-            await redis_client.expire(key, settings.LOGIN_IP_LOCK_SECONDS)
+        # 🔴 不要拆回 `incr` + `expire` 两步（#401）：两步之间进程被杀或 Redis 超时，key 永不过期，
+        # 整个出口 IP（公司 NAT）被永久判成「用户名或密码有误」
+        count = await redis_client.eval(_INCREMENT_LOGIN_FAILURE, 1, key, str(settings.LOGIN_IP_LOCK_SECONDS))
         if count == settings.LOGIN_IP_LOCK_THRESHOLD:
             # 🔴 对方看到的仍是「用户名或密码有误」（check_ip_lock 不给攻击者反馈），所以**只有这一行**
             # 让管理员知道这个 IP 被锁了。`==` 不是 `>=`：只在跨过阈值的那一次记，锁住之后的每次尝试不再记

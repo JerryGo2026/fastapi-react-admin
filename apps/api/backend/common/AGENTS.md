@@ -212,7 +212,7 @@ AI 工具的参数报错也走它。顺带：dev 下 422 文案回显的输入�
 | **只放进程内存，不放 Redis** | 迁移、`fba` 命令行装插件也会改菜单，它们不经过服务层、但都伴随重启；放 Redis 的旧数据会熬过重启 |
 | **失效挂在提交之后**（`run_after_commit`），本进程当场清、其他 worker 经发布订阅清 | 提交前就清：并发请求读到旧行、写回缓存，之后没人再清（`UserCacheManager` 那条 #34） |
 | **加载前放占位，加载完占位还在才写入** | 「读到旧行 → 别处提交并失效 → 把旧行写进缓存」会把旧数据钉住一个 TTL |
-| **TTL 60 秒兜底** | 发布订阅监听器连续重连失败 10 次会**永久停止**（`pubsub.py`），之后别的 worker 的失效都收不到 |
+| **TTL 60 秒兜底** | 发布订阅断线期间别的 worker 的失效收不到（监听器会一直重连、重新订阅上之后清空本地缓存，#401 之前是失败 10 次就永久停止） |
 | **单飞：同一时刻只有一个请求加载，其余等它的结果** | 第一版每个冷请求都放自己的占位、覆盖前一个的，先开始的加载完发现占位不是自己的就不写入 —— 请求源源不断时**缓存一直填不上**，每个请求都查整张表 |
 | **在调用方的引擎上另开一个会话加载** | 借调用方的会话：它可能在改过菜单、没提交的事务里，未提交的行进了共享缓存，回滚了也留到 TTL。改用全局 `async_db_session` 也不行：在另一个事件循环里调服务的测试跨循环用连接，全套跑到一半卡死 |
 
@@ -274,3 +274,14 @@ AI 工具的参数报错也走它。顺带：dev 下 422 文案回显的输入�
 **实测证据**（2026-11-21，PostgreSQL / Redis 私有库）：`plugin/dict/tests/test_dict_type_sync.py` 3 条，修前全红（新编码 404 ·
 复用旧编码的新类型返回旧项 · 删类型后旧选项照样 200）；挂了装饰器、但判断写在更新之后时，改编码那两条仍红（新编码 404）。
 提交后那次：`test_dict_cache_after_commit.py::test_dict_type_writes_also_clear_after_commit` 两条（update / delete），去掉装饰器即红。
+
+## #401：缓存失效订阅器 · 在线状态 · 页码上界
+
+| 症状 | 根因 | 修法 | 实测证据 |
+|---|---|---|---|
+| 🔴 Redis 重启一次之后，A 进程改了字典 / 菜单，B 进程一直返回旧值直到 TTL 到期，只有 error 日志 | `cache/pubsub.py` 连续 10 次订阅失败（约 50–100 秒）就 `break`，之后没人再拉起；断线期间别的进程发的失效消息丢了，重连后也不清本地缓存 | 无限重试 + 指数退避（`CACHE_PUBSUB_RECONNECT_DELAY` 起、封顶 `CACHE_PUBSUB_RECONNECT_MAX_DELAY`，删掉 `CACHE_PUBSUB_MAX_RECONNECT_ATTEMPTS`）；**每次（重）订阅成功后整份清空本地缓存** —— 漏掉的消息补不回来，哪些过时无从知道。🔴 订阅连接要 `set_retry(Retry(NoBackoff(), 0))`（评审发现）：redis-py 默认在 `listen()` 里自己重试 3 次、重连并重新订阅，**不抛异常**，外层看不到这次断线 → 几秒的 Redis 重启照样丢消息、不清缓存 | `tests/test_cache_pubsub_reconnect.py`（打桩 `RedisCli`，前 25 次订阅失败、中途再断一次）。变异：改回 `while failures < 10` → 卡在等订阅超时；去掉清缓存 → 红在旧值还在。库内重试那条：真 Redis 上 `CLIENT KILL` 掉订阅连接（`test_a_connection_drop_that_redis_py_reconnects_by_itself_…`），不关重试时红在「旧值还在」 |
+| 进程被 SIGKILL（OOM、`docker kill`）之后，「在线用户」页一直显示那几个会话在线 | `fba:token_online*` 三类 key 都没有 TTL，只靠 `disconnect` 清，启动时也不清 | `socketio/server.py`：`sid` / `session` 两类 key 带 `TOKEN_ONLINE_TTL_SECONDS`（90）TTL，**持有连接的进程**按本进程连接表 `_local_sids` 每三分之一 TTL 续期（Redis 丢了 key 也写回去）；断开时顺手摘掉会话集合里 sid key 已过期的成员；全站集合 `fba:token_online` 没法按成员过期，不再写，在线页改成看会话集合在不在；启动时 `sweep_presence_keys()` 删全站集合、给无 TTL 的遗留 key 补 TTL（只碰无 TTL 的，多副本安全） | `app/admin/tests/api_v1/test_session.py` 末尾五条：TTL 在、「进程死了」（删 key 模拟过期）后显示离线、心跳把丢掉的 key 写回、死进程的 sid 不让会话挂着在线、启动清扫。修之前五条全红。评审补两条：`connect` 写 Redis 抛了时 sid 不能留在 `_local_sids`（握手被拒不会有 `disconnect`，心跳会把它永远写回去 → 先写 Redis 成功再记表）；心跳遍历快照途中断开的连接不能被续期写回（续期前再查一次表）。两条修前都红 |
+| 超大页码（`?page=10**20`）返回 500，开发环境还把整条 SQL 摊在 `msg` 里 | `_CustomPageParams.page` 只有 `ge=1`，OFFSET 溢出（PostgreSQL `value out of int64 range`） | `le=MAX_PAGE`（一百万：× 每页 200 仍在 32 位整数内）→ 422 | `app/admin/tests/api_v1/test_pagination_bounds.py`：修之前 `10**20` 是 500、`MAX_PAGE + 1` 是 200 |
+
+⚠️ 在线状态的 Lua 和会话那几段一样按前缀拼 key（`_PRESENCE_LEAVE` 从 `ARGV` 拼 sid key），假设 Redis 是单实例（见 [`security` 分册](security/AGENTS.md)「Lua 脚本按前缀拼 key」）。
+⚠️ 滚动升级期间旧版本实例的在线页还读全站集合：新实例启动时把它删了，旧实例那几分钟里会把所有会话显示成离线 —— 只是显示，不影响登录态。

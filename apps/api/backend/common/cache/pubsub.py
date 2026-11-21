@@ -1,10 +1,39 @@
 import asyncio
 import json
 
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
+
 from backend.common.cache.local import local_cache_manager
 from backend.common.log import log
 from backend.core.conf import settings
 from backend.database.redis import RedisCli, redis_client
+
+#: 重连前的等待（测试换成不等的）
+_sleep = asyncio.sleep
+
+
+def _handle_message(message: dict) -> None:
+    try:
+        data = json.loads(message['data'])
+        cache_key = data['cache_key']
+        if not data['delete_by_prefix']:
+            local_cache_manager.delete(cache_key)
+        else:
+            local_cache_manager.delete_by_prefix(cache_key)
+    except json.JSONDecodeError as e:
+        log.warning(f'[CachePubSub] 消息格式错误 {e}')
+    except Exception as e:
+        log.error(f'[CachePubSub] 处理通知失败: {e}')
+
+
+async def _close_quietly(*resources: object) -> None:
+    for resource in resources:
+        if resource is not None:
+            try:
+                await resource.aclose()
+            except Exception:
+                pass
 
 
 class CachePubSubManager:
@@ -28,61 +57,51 @@ class CachePubSubManager:
             log.warning(f'[CachePubSub] 发布通知失败: {e}')
 
     @staticmethod
-    async def subscribe_and_listen() -> None:  # ruff:ignore[complex-structure]
-        """订阅并监听缓存失效通知"""
-        reconnect_attempts = 0
+    async def subscribe_and_listen() -> None:
+        """订阅并监听缓存失效通知
 
-        while reconnect_attempts < settings.CACHE_PUBSUB_MAX_RECONNECT_ATTEMPTS:
+        🔴 **断线多久都要重连，不设次数上限**（#401）。原来连续失败 10 次（Redis 断开约 50–100 秒）就退出，
+        之后没人再拉起 —— Redis 重启一次，别的进程发的失效通知从此收不到，本地缓存只能等 TTL。
+        失败之后按指数退避，封顶 `CACHE_PUBSUB_RECONNECT_MAX_DELAY` 秒。
+
+        🔴 **每次（重）订阅成功之后清空本地缓存。** 断线期间别的进程发的失效消息丢了、补不回来，
+        本地缓存里哪些已经过时无从知道，只能整份作废（下一次读重新回源）。
+        """
+        failures = 0
+        while True:
             pubsub_client: RedisCli | None = None
             pubsub = None
-
             try:
                 # 使用独立连接
                 pubsub_client = RedisCli(socket_timeout=None)
+                # 🔴 关掉 redis-py 的库内重试（评审发现）：默认 3 次，断线后在 `listen()` 里自己重连、重新订阅，
+                # 不抛异常 —— 外层看不到断线，断线期间漏掉的失效消息丢了、本地缓存也不清。
+                # 不重试 = 每次断线都走下面「重新订阅 + 清本地缓存」那条路
+                pubsub_client.set_retry(Retry(NoBackoff(), 0))
                 pubsub = pubsub_client.pubsub()
                 await pubsub.subscribe(settings.CACHE_PUBSUB_CHANNEL)
-
-                # 发布订阅成功
-                reconnect_attempts = 0
+                # 订阅上了：断线期间漏掉的通知补不回来，整份本地缓存作废
+                local_cache_manager.clear()
+                if failures:
+                    log.info(f'[CachePubSub] 第 {failures} 次重试后重新订阅成功，已清空本地缓存')
+                failures = 0
 
                 async for message in pubsub.listen():
                     if message['type'] == 'message':
-                        try:
-                            data = json.loads(message['data'])
-                            cache_key = data['cache_key']
-                            if not data['delete_by_prefix']:
-                                local_cache_manager.delete(cache_key)
-                            else:
-                                local_cache_manager.delete_by_prefix(cache_key)
-                        except json.JSONDecodeError as e:
-                            log.warning(f'[CachePubSub] 消息格式错误 {e}')
-                        except Exception as e:
-                            log.error(f'[CachePubSub] 处理通知失败: {e}')
+                        _handle_message(message)
 
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
-                reconnect_attempts += 1
-                log.error(
-                    f'[CachePubSub] 订阅异常 ({reconnect_attempts}/{settings.CACHE_PUBSUB_MAX_RECONNECT_ATTEMPTS}): {e}'
+                failures += 1
+                delay = min(
+                    settings.CACHE_PUBSUB_RECONNECT_DELAY * 2 ** min(failures - 1, 16),
+                    settings.CACHE_PUBSUB_RECONNECT_MAX_DELAY,
                 )
-
-                if reconnect_attempts >= settings.CACHE_PUBSUB_MAX_RECONNECT_ATTEMPTS:
-                    log.error('[CachePubSub] 达到最大重连次数，停止订阅')
-                    break
-
-                await asyncio.sleep(settings.CACHE_PUBSUB_RECONNECT_DELAY)
+                log.error(f'[CachePubSub] 订阅异常（第 {failures} 次），{delay} 秒后重连: {e}')
+                await _sleep(delay)
             finally:
-                if pubsub_client:
-                    try:
-                        await pubsub_client.aclose()
-                    except Exception:
-                        pass
-                if pubsub:
-                    try:
-                        await pubsub.aclose()
-                    except Exception:
-                        pass
+                await _close_quietly(pubsub, pubsub_client)
 
     @classmethod
     def start_listener(cls) -> None:

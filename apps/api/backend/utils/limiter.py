@@ -63,8 +63,40 @@ async def _redis_time_ms(redis: Redis) -> int:
     return seconds * 1000 + microseconds // 1000
 
 
+def _put_item_with_ttl() -> str:
+    """pyrate_limiter 的 `PUT_ITEM`，写入之后给 bucket 设过期时间（最长窗口 + 1 秒）
+
+    🔴 原版只 `ZADD`、从不设过期（#401，pyrate_limiter 4.4.0 核对过）：清理全靠本进程的 leaker，进程重启、
+    或本地 bucket 缓存超过 `REQUEST_LIMITER_BUCKET_CACHE_MAX_SIZE` 被淘汰之后没人再清，
+    每个「IP × 限流路由」留下一个永不过期的 zset。窗口外的项本来就不计数，key 过期不改变限流结果
+    """
+    script = LuaScript.PUT_ITEM
+    tail = '    return -1\n'
+    assert script.count(tail) == 1, 'pyrate_limiter 的 PUT_ITEM 变了，重新核对这段补丁'
+    return script.replace(
+        tail,
+        """    local ttl = 0
+    for i=1,rates_count do
+        local interval = tonumber(ARGV[5 + (i - 1) * 2])
+        if interval > ttl then
+            ttl = interval
+        end
+    end
+    redis.call('PEXPIRE', bucket, ttl + 1000)
+"""
+        + tail,
+    )
+
+
+PUT_ITEM_WITH_TTL = _put_item_with_ttl()
+
+
 class RedisTimeBucket(RedisBucket):
-    """使用 Redis 服务端时间的 Redis bucket"""
+    """使用 Redis 服务端时间的 Redis bucket；写入时一并设过期（`PUT_ITEM_WITH_TTL`）"""
+
+    @classmethod
+    async def init(cls, rates: list[Rate], redis: Redis, bucket_key: str) -> 'RedisTimeBucket':  # type: ignore[override]
+        return cls(rates, redis, bucket_key, await redis.script_load(PUT_ITEM_WITH_TTL))
 
     async def now(self) -> int:
         """获取 Redis 服务端当前时间"""
@@ -82,7 +114,7 @@ class RedisTimeBucket(RedisBucket):
         try:
             return await super().put(item)
         except NoScriptError:
-            self.script_hash = await self.redis.script_load(LuaScript.PUT_ITEM)
+            self.script_hash = await self.redis.script_load(PUT_ITEM_WITH_TTL)
             return await super().put(item)
 
 
@@ -210,6 +242,27 @@ class RedisBucketFactory(BucketFactory):
         """
         value = ':'.join(f'{rate.limit}:{rate.interval}' for rate in sorted(rates, key=lambda rate: rate.interval))
         return sha256(value.encode()).hexdigest()
+
+
+_EXPIRE_IF_PERSISTENT = """
+if redis.call('TTL', KEYS[1]) == -1 then
+    return redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return 0
+"""
+#: 启动时给遗留桶补的 TTL（秒）。比所有限流窗口都长（最长是 5 分钟）；还有人在用的桶，下一次写入会换成按窗口算的 TTL
+_LEGACY_BUCKET_TTL_SECONDS = 3600
+
+
+async def sweep_limiter_keys() -> int:
+    """启动时：升级之前留下的、没有 TTL 的限流桶补一个 TTL（#401）。只碰「没有 TTL」的 key，多副本下也安全
+
+    :return: 补了几个
+    """
+    fixed = 0
+    async for key in redis_client.scan_iter(match=f'{settings.REQUEST_LIMITER_REDIS_PREFIX}:*', count=1000):
+        fixed += await redis_client.eval(_EXPIRE_IF_PERSISTENT, 1, key, str(_LEGACY_BUCKET_TTL_SECONDS))
+    return fixed
 
 
 def default_identifier(request: Request) -> str:

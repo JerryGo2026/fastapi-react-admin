@@ -84,3 +84,75 @@ def test_mysql_fall_back_second_occurrence_round_trip(ny: None) -> None:
     wall = bind(second).replace(tzinfo=None)  # MySQL 存的就是这个墙上时间
     back = TimeZone().process_result_value(wall, None)
     assert back == second
+
+
+def _chain_row(created: datetime) -> dict:
+    return {
+        'chain_seq': 7,
+        'trace_id': 't',
+        'entity_type': 'sys_user',
+        'entity_id': 1,
+        'entity_label': 'admin',
+        'action': 'update',
+        'changes': {'nickname': ['a', 'b']},
+        'fields': ',nickname,',
+        'actor_id': 1,
+        'actor_name': 'admin',
+        'source': 'api',
+        'source_ref': None,
+        'ip': '127.0.0.1',
+        'created_time': created,
+    }
+
+
+def test_audit_chain_row_written_in_the_repeated_hour_still_verifies_on_mysql(ny: None) -> None:
+    """🔴 #401：MySQL 存的是墙上时间，秋季回拨那一小时第二次出现的时刻读回来被当成第一次（早一小时），
+    换算成 UTC 和签名对不上 —— 那一小时写的审计行在「校验完整性」里全部报 `modified`。
+    签名照旧按写入时的真实时刻（已有的行一行都不重签），校验时墙上时间有歧义的话两种读法都认
+    """
+    from backend.common.data_change import chain
+
+    second = datetime(2026, 11, 1, 6, 30, 15, 123456, tzinfo=UTC)  # 01:30:15 EST，回拨后第二次
+    stored = chain.sign('prev', _chain_row(bind(second)), b'k', 'kid')
+    # MySQL 读回来的：驱动给的是不带 fold 的墙上时间
+    read_back = TimeZone().process_result_value(bind(second).replace(tzinfo=None, fold=0), None)
+    assert read_back.astimezone(UTC) != second  # 前提：读回来确实早了一小时
+
+    assert chain.signature_matches('prev', _chain_row(read_back), b'k', 'kid', stored, wall_clock_storage=True)
+    # PostgreSQL / SQL Server 读回来的是真实时刻，第一种读法就对得上
+    assert chain.signature_matches('prev', _chain_row(second), b'k', 'kid', stored)
+
+
+def test_audit_chain_still_catches_a_moved_time(ny: None) -> None:
+    """放宽只针对「墙上时间有歧义的那一小时」：别的时间改动照样报"""
+    from backend.common.data_change import chain
+
+    noon = datetime(2026, 11, 1, 17, 0, tzinfo=UTC)
+    stored = chain.sign('prev', _chain_row(noon), b'k', 'kid')
+    assert not chain.signature_matches('prev', _chain_row(noon - timedelta(hours=1)), b'k', 'kid', stored)
+    first = datetime(2026, 11, 1, 5, 30, tzinfo=UTC)  # 01:30 EDT，第一次
+    stored = chain.sign('prev', _chain_row(first), b'k', 'kid')
+    assert not chain.signature_matches('prev', _chain_row(first + timedelta(minutes=1)), b'k', 'kid', stored)
+
+
+def test_audit_chain_does_not_accept_an_hour_shift_where_the_offset_is_stored(ny: None) -> None:
+    """🔴 评审发现：放宽原来对三个方言一视同仁。PostgreSQL / SQL Server 存了偏移、读回来就是真实时刻，
+    用不着第二种读法 —— 放宽在那里只剩一个作用：把那一小时里某行的 `created_time` 改早 / 改晚恰好一小时，
+    校验照样通过。只有 MySQL（不存偏移）才认第二种读法"""
+    from backend.common.data_change import chain
+
+    second = datetime(2026, 11, 1, 6, 30, 15, tzinfo=UTC)  # 01:30:15 EST，回拨后第二次
+    stored = chain.sign('prev', _chain_row(bind(second)), b'k', 'kid')
+    tampered = second - timedelta(hours=1)  # 01:30:15 EDT：同一个墙上时间的另一种读法
+    assert not chain.signature_matches('prev', _chain_row(tampered), b'k', 'kid', stored)
+    assert chain.signature_matches('prev', _chain_row(tampered), b'k', 'kid', stored, wall_clock_storage=True)
+
+
+@pytest.mark.parametrize('dialect', ['mysql', 'postgresql', 'mssql'])
+def test_only_mysql_reads_created_time_back_as_wall_clock(dialect: str) -> None:
+    from types import SimpleNamespace
+
+    from backend.common.data_change import chain
+
+    session = SimpleNamespace(get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name=dialect)))
+    assert chain._stores_wall_clock(session) is (dialect == 'mysql')  # type: ignore[arg-type]

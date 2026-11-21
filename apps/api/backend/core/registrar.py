@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import time
 
@@ -27,6 +28,7 @@ from backend.common.lifespan import lifespan_manager
 from backend.common.log import set_custom_logfile, setup_logging
 from backend.common.observability.otel import init_otel
 from backend.common.response.response_code import StandardResponseCode
+from backend.common.socketio.server import presence_heartbeat, sweep_presence_keys
 from backend.core.conf import settings
 from backend.core.path_conf import PUBLIC_UPLOAD_DIR, STATIC_DIR, UPLOAD_DIR
 from backend.database.db import async_db_session, create_tables, dispose_database
@@ -39,6 +41,7 @@ from backend.middleware.state_middleware import StateMiddleware
 from backend.plugin.hooks import init_plugin_otel_hooks, register_plugin_hooks
 from backend.plugin.router import build_final_router
 from backend.utils.demo_mode import demo_site
+from backend.utils.limiter import sweep_limiter_keys
 from backend.utils.openapi import ensure_unique_route_names, simplify_operation_ids
 from backend.utils.serializers import MsgSpecJSONResponse
 from backend.utils.snowflake import snowflake
@@ -143,9 +146,19 @@ async def register_init(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动缓存 Pub/Sub 监听器
     cache_pubsub_manager.start_listener()
 
+    # 在线状态：升级前留下的无 TTL key 补上 TTL，本进程的连接靠心跳续期（#401）
+    await sweep_presence_keys()
+    # 限流桶：升级前留下的无 TTL zset 补上 TTL（#401）
+    await sweep_limiter_keys()
+    presence_task = asyncio.create_task(presence_heartbeat())
+
     try:
         yield
     finally:
+        presence_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await presence_task
+
         # 停止缓存 Pub/Sub 监听器
         await cache_pubsub_manager.stop_listener()
 
