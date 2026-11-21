@@ -51,7 +51,12 @@ async function getUpdater() {
   return autoUpdater
 }
 
-export async function checkForUpdates(emit: Emit): Promise<void> {
+export async function checkForUpdates(emitRaw: Emit): Promise<void> {
+  // 失败一律进主进程日志：自动检查时渲染层未必有人在听这条事件（#428）
+  const emit: Emit = (event) => {
+    if (event.kind === "error") console.warn(`[desktop] 检查更新失败: ${event.message}`)
+    emitRaw(event)
+  }
   const updater = await getUpdater()
   if (!updater) {
     emit({ kind: "not-available" })
@@ -78,6 +83,42 @@ export async function checkForUpdates(emit: Emit): Promise<void> {
      */
     emit({ kind: "error", message: e instanceof Error ? e.message : String(e) })
   }
+}
+
+/** 启动后多久查第一次：让首屏和登录的请求先走，别和下载抢带宽 */
+export const AUTO_CHECK_DELAY_MS = 30_000
+/** 之后每隔多久查一次：终端机常常几个月不关机，只在启动时查等于永远停在那天的版本 */
+export const AUTO_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
+
+/**
+ * 主进程自己定时检查更新（#428）。
+ *
+ * 🔴 原来**谁都不调** `checkForUpdates`：主进程只注册了 `updater:check` 这条 IPC，
+ * 渲染层（web / platform）没有任何一处调 `desktop.updater.check()` —— 自动更新在本仓库的包里
+ * 从来不会发生，而 release-notes 写着「自动更新正常」。放在主进程而不是渲染层：
+ * 它不依赖用户登录、不依赖某个页面挂着，kiosk 机器上停在登录页也照样查。
+ *
+ * 下载完不弹重启（`autoInstallOnAppQuit`）：下次退出时静默装上。
+ *
+ * - 未打包：不安排（没有 app-update.yml，查了只会报一句误导人的错）
+ * - macOS：不安排。包没签名，electron-updater 下完会因为校验不了代码签名拒绝安装 ——
+ *   定时查等于每 4 小时下一遍完整 zip 再失败。签了名的下游项目把这一行删掉即可；
+ *   渲染层手动 `updater.check()` 不受影响
+ */
+export function scheduleUpdateChecks(emit: Emit): void {
+  if (!app.isPackaged) return
+  if (process.platform === "darwin") return
+  const run = () => {
+    // checkForUpdates 自己接住了 electron-updater 的失败；这里兜的是 import 本身炸了之类的意外，
+    // 定时器回调里的 rejection 没人接会变成 unhandledRejection
+    checkForUpdates(emit).catch((e: unknown) => {
+      console.warn("[desktop] 检查更新失败:", e instanceof Error ? e.message : e)
+    })
+  }
+  setTimeout(() => {
+    run()
+    setInterval(run, AUTO_CHECK_INTERVAL_MS)
+  }, AUTO_CHECK_DELAY_MS)
 }
 
 export async function quitAndInstall(): Promise<void> {

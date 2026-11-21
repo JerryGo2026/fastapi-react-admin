@@ -29,7 +29,8 @@ src/main/
   config.ts             运行期配置（userData/config.json）
   auth.ts               refresh token 主进程托管 + safeStorage
   print.ts              静默打印 HTML
-  updater.ts            electron-updater（generic 源）
+  updater.ts            electron-updater：启动后 30 秒查一次、之后每 4 小时（macOS 不自动查）
+  login-item.ts         开机自启与 autoLaunch 同步（Linux 走 XDG autostart）
   ipc.ts                IPC 注册（唯一的注册点）
   devices/
     types.ts            设备适配器接口
