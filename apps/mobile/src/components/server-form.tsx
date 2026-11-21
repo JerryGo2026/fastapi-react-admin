@@ -1,20 +1,19 @@
 import { useTranslation } from 'react-i18next'
-import { TriangleAlertIcon } from 'lucide-react-native'
+import { TriangleAlertIcon, XIcon } from 'lucide-react-native'
 import * as React from 'react'
-import { ActivityIndicator, View } from 'react-native'
+import { ActivityIndicator, Pressable, View } from 'react-native'
 
 import { Group, GroupHeader, PressRow, Row } from '@/components/grouped'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Icon } from '@/components/ui/icon'
 import { Input } from '@/components/ui/input'
 import { Text } from '@/components/ui/text'
 import { API_BASE_DEFAULT } from '@/lib/config'
 import { useServer } from '@/lib/server'
+import { PROBE_TIMEOUT_MS, probeThenSwitch } from '@/lib/server-probe'
 import { serverBaseUrl } from '@/lib/server-url'
 import { useSession } from '@/lib/session'
-
-/** 探测的超时。连不上的地址 RN 的 fetch 自己要等 10～60 秒，按钮一直转着像卡死；Hermes 没有 `AbortSignal.timeout()` */
-const PROBE_TIMEOUT_MS = 10_000
 
 /**
  * 服务器地址表单 —— 设置屏（`(app)/server.tsx`，已登录）和登录屏（未登录）共用一份（#406）。
@@ -30,48 +29,71 @@ const PROBE_TIMEOUT_MS = 10_000
  * 🔴 **保存成功要清掉旧服务器的凭据**（`switchServer`）：token 是跟着服务器发的，换了服务器旧 token 一定无效；
  * cookie jar 里旧服务器的 refresh cookie 要记「待撤销」，否则以后切回去冷启动会被静默登回去（#319）。
  */
-export function ServerForm({ onDone }: { onDone?: () => void }) {
+export function ServerForm({ onDone, signedIn = false }: { onDone?: () => void; signedIn?: boolean }) {
   const { t } = useTranslation()
   const { base, isCustom } = useServer()
   const { switchServer } = useSession()
   const [value, setValue] = React.useState(base)
   const [probing, setProbing] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  /** 单飞（硬纪律 10）：探测 / 恢复默认各自 await 期间不再进第二次，用 ref 判、不等重渲染 */
+  const busy = React.useRef(false)
+
+  /*
+   * 🔴 卸载即取消（评审跟进）：登录屏点「取消」、离开设置屏都会卸载这张表单。不掐断的话探测照样跑完、
+   * 通了就换服务器 —— 屏上还是旧地址，存进去的已经是新的。判据在 `probeThenSwitch` 里
+   */
+  const cancel = React.useRef<AbortController | null>(null)
+  React.useEffect(() => {
+    const controller = new AbortController()
+    cancel.current = controller
+    return () => controller.abort()
+  }, [])
 
   const normalized = serverBaseUrl(value)
   const changed = normalized !== null && normalized !== base
 
   async function save() {
-    if (!normalized || probing) return
+    if (!normalized || busy.current || !cancel.current) return
+    const signal = cancel.current.signal
+    busy.current = true
     setProbing(true)
     setError(null)
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
     try {
-      let res: Response
-      try {
-        res = await fetch(`${normalized}/api/v1/auth/captcha`, { method: 'GET', signal: controller.signal })
-      } catch (err) {
-        throw controller.signal.aborted ? new Error(t('{{s}} 秒内没有响应', { s: PROBE_TIMEOUT_MS / 1000 })) : err
-      }
-      if (!res.ok) throw new Error(t('服务器返回 HTTP {{code}}', { code: res.status }))
-      const body = (await res.json().catch(() => null)) as { code?: number } | null
-      // FBA 的所有响应都带 code；不带说明这不是本项目的后端
-      if (typeof body?.code !== 'number') throw new Error(t('这个地址不像是本项目的后端'))
-      await switchServer(normalized === API_BASE_DEFAULT ? null : normalized)
-      onDone?.()
+      const failure = await probeThenSwitch(normalized, {
+        fetch: (url, init) => fetch(url, init),
+        switchServer: () => switchServer(normalized === API_BASE_DEFAULT ? null : normalized),
+        cancel: signal,
+      })
+      if (signal.aborted) return
+      if (failure === null) onDone?.()
+      else if (failure.kind === 'timeout') setError(t('{{s}} 秒内没有响应', { s: PROBE_TIMEOUT_MS / 1000 }))
+      else if (failure.kind === 'http') setError(t('服务器返回 HTTP {{code}}', { code: failure.status }))
+      else if (failure.kind === 'not-fba') setError(t('这个地址不像是本项目的后端'))
+      else if (failure.kind === 'network') setError(failure.message)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (!signal.aborted) setError(err instanceof Error ? err.message : String(err))
     } finally {
-      clearTimeout(timer)
-      setProbing(false)
+      busy.current = false
+      if (!signal.aborted) setProbing(false)
     }
   }
 
+  /** 🔴 探测进行中不给点（评审跟进）：慢的探测后到，会把刚恢复的默认地址又换回去 —— 和用户最后一个动作相反 */
   async function reset() {
-    await switchServer(null)
-    setValue(API_BASE_DEFAULT)
-    onDone?.()
+    if (busy.current) return
+    busy.current = true
+    setError(null)
+    try {
+      await switchServer(null)
+      setValue(API_BASE_DEFAULT)
+      onDone?.()
+    } catch (err) {
+      // 硬纪律 9：失败要看得见，不能是一个没人接的 rejection
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      busy.current = false
+    }
   }
 
   return (
@@ -89,6 +111,23 @@ export function ServerForm({ onDone }: { onDone?: () => void }) {
             testID="server-input"
             className="h-auto flex-1 border-0 bg-transparent px-0 shadow-none font-mono text-[13px]"
           />
+          {/*
+            清空。Android 的输入框没有 iOS 的 clearButtonMode，而这里是预填了当前地址的：
+            点进去光标落在中间，退格只删光标前面那半截（Maestro 就这样拼出过 `…:8001001`）
+          */}
+          {value && !probing ? (
+            <Pressable
+              onPress={() => {
+                setValue('')
+                setError(null)
+              }}
+              hitSlop={10}
+              accessibilityLabel={t('清空')}
+              testID="server-clear"
+            >
+              <Icon as={XIcon} className="text-muted-foreground size-4" />
+            </Pressable>
+          ) : null}
         </Row>
       </Group>
 
@@ -121,8 +160,11 @@ export function ServerForm({ onDone }: { onDone?: () => void }) {
           {probing ? <ActivityIndicator size="small" color="#fff" /> : null}
           <Text className="text-base font-semibold">{probing ? t('正在连…') : t('测试并保存')}</Text>
         </Button>
+        {/* 登录屏上没登录，「会退出当前登录」不成立 */}
         <Text className="text-muted-foreground px-1 text-xs leading-5">
-          {t('保存前会先探一次这个地址；成功后会退出当前登录（token 跟着服务器发的）。')}
+          {signedIn
+            ? t('保存前会先探一次这个地址；成功后会退出当前登录（token 跟着服务器发的）。')
+            : t('保存前会先探一次这个地址，连得上才存。')}
         </Text>
       </View>
 
@@ -130,7 +172,7 @@ export function ServerForm({ onDone }: { onDone?: () => void }) {
         <>
           <GroupHeader>{t('恢复')}</GroupHeader>
           <Group>
-            <PressRow first onPress={() => void reset()} testID="server-reset">
+            <PressRow first onPress={probing ? undefined : () => void reset()} testID="server-reset">
               <Text className="text-destructive flex-1 text-[15px]">{t('恢复默认地址')}</Text>
               <Text className="text-muted-foreground font-mono text-[11px]" numberOfLines={1}>
                 {API_BASE_DEFAULT}

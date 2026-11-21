@@ -329,6 +329,28 @@ export default function LoginScreen() {
     if (from === 'password' && captcha.kind === 'ready') loadCaptcha()
   }
 
+  /**
+   * 换好服务器之后（评审跟进）：上一台服务器的短信冷却 / 「已发送」/ 报错 / 填了一半的图形验证码答案都不再成立 ——
+   * 留着的话，手机页签对一台根本没发过码的服务器锁 60 秒，还说「验证码已发送」
+   */
+  function afterServerSwitch() {
+    setEditingServer(false)
+    setError(null)
+    setPhoneError(null)
+    setSmsSent(false)
+    setSmsPhone('')
+    setSmsDeadline(0)
+    setSmsLeft(0)
+    setSmsCode('')
+    setCode('')
+  }
+
+  /**
+   * 🔴 登录 / 发码的请求还在路上时不给换服务器（评审跟进）：响应回来时地址已经换了，
+   * `finishFirstStep` 会把 A 发的 token 存下、删掉 **B** 的待撤销标记，再拿 A 的 token 去 B 上 `/me`
+   */
+  const serverLocked = submitting || smsSending
+
   const canSubmit =
     username.trim().length > 0 &&
     password.length > 0 &&
@@ -365,6 +387,7 @@ export default function LoginScreen() {
       {/* 连不上的常见原因就是地址本身不对 / 那台服务器下线了：入口直接放在错误旁边（#406） */}
       <Button
         variant="outline"
+        disabled={serverLocked}
         onPress={() => setEditingServer(true)}
         testID="login-change-server"
         className="mt-2 rounded-xl"
@@ -418,7 +441,7 @@ export default function LoginScreen() {
                   <Text className="text-primary text-[15px]">{t('取消')}</Text>
                 </Pressable>
               </View>
-              <ServerForm onDone={() => setEditingServer(false)} />
+              <ServerForm onDone={afterServerSwitch} />
             </View>
           ) : (
             <>
@@ -616,11 +639,12 @@ export default function LoginScreen() {
           */}
           <PublicNotices />
 
-          {/* 服务器地址：未登录时唯一能改它的地方（#406）。二次验证进行中不给换 —— 挑战令牌是那台服务器发的 */}
+          {/* 服务器地址：未登录时唯一能改它的地方（#406）。二次验证进行中 / 请求在路上时不给换 —— 挑战令牌和响应都属于那台服务器 */}
           {!editingServer && !mfa ? (
             <View className="pt-4">
               <Group>
-                <PressRow first onPress={() => setEditingServer(true)} testID="login-server">
+                {/* 请求在路上时行还在（布局不跳），只是点不动 */}
+                <PressRow first onPress={serverLocked ? undefined : () => setEditingServer(true)} testID="login-server">
                   <Icon as={ServerIcon} className="text-muted-foreground size-4" />
                   <Text className="text-[15px]">{t('服务器')}</Text>
                   <Text

@@ -14,7 +14,7 @@ export default function ServerScreen() {
       className="bg-background flex-1"
     >
       <ScrollView contentContainerClassName="py-4" keyboardShouldPersistTaps="handled">
-        <ServerForm />
+        <ServerForm signedIn />
       </ScrollView>
     </KeyboardAvoidingView>
   )

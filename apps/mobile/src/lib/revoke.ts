@@ -3,6 +3,7 @@ import { confirmsLogout } from '@admin/api'
 import { api } from '@/lib/api'
 import { logoutPending } from '@/lib/logout-pending'
 import { serverStore } from '@/lib/server'
+import { hostOf } from '@/lib/server-url'
 import { tokenStore } from '@/lib/token-store'
 
 /**
@@ -42,8 +43,11 @@ async function revokeOnServer(base: string): Promise<void> {
   await logoutPending.remove(base)
 }
 
-/** 后台那次撤销，连同它打向哪台服务器。登录前要等它落地，见 `startRevoke` */
-let revoking: { base: string; done: Promise<void> } | null = null
+/**
+ * 还在路上的撤销，各自记着打向哪个**主机**。登录前要等它们落地，见 `startRevoke` / `settleRevoke`。
+ * 🔴 **是集合，不是单槽**（评审跟进）：A→B→A 连换两次时，单槽会被 B 的那次覆盖，回到 A 登录就不等 A 的了
+ */
+const revoking = new Set<{ host: string; done: Promise<void> }>()
 
 /**
  * 🔴 **登录前要等上一次撤销落地**：登出响应会带一条清空 refresh cookie 的 `Set-Cookie`。
@@ -54,19 +58,24 @@ export function startRevoke(): void {
   // 🔴 同步调用：`revokeOnServer` 在第一个 await 之前就读了地址、发出了请求 —— 换服务器紧接着
   // 就改地址（`switchServer`），这里要是先 await 一下，登出就打到新服务器上去了
   const base = serverStore.current()
-  const done = revokeOnServer(base).finally(() => {
-    if (revoking?.done === done) revoking = null
-  })
-  revoking = { base, done }
+  const entry = { host: hostOf(base), done: Promise.resolve() }
+  entry.done = revokeOnServer(base)
+    .catch(() => {})
+    .finally(() => revoking.delete(entry))
+  revoking.add(entry)
 }
 
 /**
- * 登录前调用。🔴 **只等打向当前这台服务器的那次撤销**（#406）：cookie jar 按主机分，
- * 旧服务器的登出响应清不到新服务器的 cookie，没有可防的竞态。原来无条件等 ——
- * 旧服务器连不上（正是要换服务器的典型原因）时，在新服务器上点登录要白等满 8 秒超时
+ * 登录前调用。🔴 **只等打向当前这个主机的撤销**（#406）：旧服务器连不上（正是要换服务器的典型原因）时，
+ * 在别的主机上点登录不该白等满 8 秒超时 —— 别的主机的登出响应清不到这里的 cookie。
+ *
+ * 🔴 **按主机比，不按整个基址比**（评审跟进）：cookie 不分端口和协议（RFC 6265），
+ * `http://h:8088` → `http://h:8089` 时旧端口的登出响应照样清得掉新端口的 refresh cookie（`Path` 都是 `/api/v1/auth`），
+ * 那就是 #374 的竞态，必须等
  */
 export async function settleRevoke(): Promise<void> {
-  if (revoking && revoking.base === serverStore.current()) await revoking.done
+  const host = hostOf(serverStore.current())
+  await Promise.all([...revoking].filter((r) => r.host === host).map((r) => r.done))
 }
 
 /**

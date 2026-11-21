@@ -33,7 +33,8 @@ function load(relative, imports, globals = {}) {
 
 // ── 地址校验 ──────────────────────────────────────────────────────────────
 
-const { serverBaseUrl } = load('../src/lib/server-url.ts', {})
+const serverUrl = load('../src/lib/server-url.ts', {})
+const { serverBaseUrl } = serverUrl
 
 test('合格的地址规范化成不带末尾斜杠的基址', () => {
   assert.equal(serverBaseUrl('  https://fra.example.com/  '), 'https://fra.example.com')
@@ -102,6 +103,7 @@ function harness(start = 'https://old.example.com') {
           set: async (next) => void ((base = next ?? 'https://default.example.com'), log.push(`server ${base}`)),
         },
       },
+      '@/lib/server-url': serverUrl, // 真模块：按主机比较就在它里面
       '@/lib/token-store': { tokenStore: { clear: async () => void ((token = null), log.push('token cleared')) } },
     },
     // 超时定时器不真排：挂着的请求不该让测试进程多等 8 秒
@@ -154,4 +156,115 @@ test('同一台服务器上登出后马上登录，仍要等撤销落地（#374 
   h.posts[0].resolve()
   await new Promise((r) => setImmediate(r))
   assert.equal(settled, true)
+})
+
+// ── 评审跟进（#406） ──────────────────────────────────────────────────────
+
+test('原来存得进去的合法地址照样收：下划线主机、结尾点、IDN、路径里的 @', () => {
+  assert.equal(serverBaseUrl('http://fba_api:8088'), 'http://fba_api:8088')
+  assert.equal(serverBaseUrl('https://h.example.com.'), 'https://h.example.com.')
+  assert.equal(serverBaseUrl('https://例子.中国'), 'https://例子.中国')
+  assert.equal(serverBaseUrl('https://h.example.com/@team'), 'https://h.example.com/@team')
+  // 账号密码 / 空标签仍然拒
+  assert.equal(serverBaseUrl('https://user@h.example.com'), null)
+  assert.equal(serverBaseUrl('https://.example.com'), null)
+  assert.equal(serverBaseUrl('https://h..example.com'), null)
+})
+
+test('同主机换端口：登录仍要等旧端口那次撤销（cookie 按主机分、不分端口）', async () => {
+  const h = harness('http://192.168.1.10:8088')
+  await h.mod.switchServer('http://192.168.1.10:8089')
+  let settled = false
+  void h.mod.settleRevoke().then(() => (settled = true))
+  await new Promise((r) => setImmediate(r))
+  assert.equal(settled, false, '旧端口的登出响应还会清掉新端口的 refresh cookie，必须等')
+  h.posts[0].resolve()
+  await new Promise((r) => setImmediate(r))
+  assert.equal(settled, true)
+})
+
+test('A→B→A 连换两次：回到 A 登录要等 A 的那次撤销，不能被 B 的覆盖掉', async () => {
+  const h = harness('https://a.example.com')
+  await h.mod.switchServer('https://b.example.com')
+  await h.mod.switchServer('https://a.example.com')
+  assert.equal(h.posts.length, 2)
+  let settled = false
+  void h.mod.settleRevoke().then(() => (settled = true))
+  await new Promise((r) => setImmediate(r))
+  assert.equal(settled, false)
+  h.posts[1].resolve() // B 的落地了，A 的还挂着
+  await new Promise((r) => setImmediate(r))
+  assert.equal(settled, false)
+  h.posts[0].resolve()
+  await new Promise((r) => setImmediate(r))
+  assert.equal(settled, true)
+})
+
+// ── 探测 → 换服务器（`lib/server-probe.ts`） ──────────────────────────────
+
+// vm 里造的对象原型不是本 realm 的，deepStrictEqual 会判不等
+const plain = (v) => JSON.parse(JSON.stringify(v))
+
+function probeHarness() {
+  const calls = { switched: 0, fetches: [] }
+  const mod = load('../src/lib/server-probe.ts', {}, { setTimeout: () => 0, clearTimeout: () => {} })
+  const fetchImpl = (url, init) => {
+    let settle
+    const p = new Promise((resolve, reject) => (settle = { resolve, reject }))
+    init.signal.addEventListener('abort', () => settle.reject(new Error('Aborted')))
+    calls.fetches.push({ url, ...settle })
+    return p
+  }
+  const run = (cancel) =>
+    mod.probeThenSwitch('https://x.example.com', {
+      fetch: fetchImpl,
+      switchServer: async () => void calls.switched++,
+      cancel: cancel.signal,
+    })
+  return { calls, run }
+}
+
+test('探测通过 → 换服务器', async () => {
+  const h = probeHarness()
+  const p = h.run(new AbortController())
+  h.calls.fetches[0].resolve({ ok: true, status: 200, json: async () => ({ code: 200 }) })
+  assert.equal(await p, null)
+  assert.equal(h.calls.switched, 1)
+  assert.equal(h.calls.fetches[0].url, 'https://x.example.com/api/v1/auth/captcha')
+})
+
+test('探测途中点了取消 / 表单卸载 → 不换服务器', async () => {
+  const h = probeHarness()
+  const cancel = new AbortController()
+  const p = h.run(cancel)
+  cancel.abort()
+  assert.deepEqual(plain(await p), { kind: 'cancelled' })
+  assert.equal(h.calls.switched, 0)
+})
+
+test('探测已经返回、还没换之前取消 → 不换服务器', async () => {
+  const h = probeHarness()
+  const cancel = new AbortController()
+  const p = h.run(cancel)
+  h.calls.fetches[0].resolve({ ok: true, status: 200, json: async () => (cancel.abort(), { code: 200 }) })
+  assert.deepEqual(plain(await p), { kind: 'cancelled' })
+  assert.equal(h.calls.switched, 0)
+})
+
+test('探测失败分类：HTTP 错 / 不像本项目后端 / 网络错，都不换', async () => {
+  for (const [res, expected] of [
+    [{ ok: false, status: 502, json: async () => null }, { kind: 'http', status: 502 }],
+    [{ ok: true, status: 200, json: async () => ({ hello: 1 }) }, { kind: 'not-fba' }],
+  ]) {
+    const h = probeHarness()
+    const p = h.run(new AbortController())
+    h.calls.fetches[0].resolve(res)
+    assert.deepEqual(plain(await p), expected)
+    assert.equal(h.calls.switched, 0)
+  }
+  const h = probeHarness()
+  const p = h.run(new AbortController())
+  h.calls.fetches[0].reject(new Error('Network request failed'))
+  assert.deepEqual(plain(await p), { kind: 'network', message: 'Network request failed' })
+  assert.equal(h.calls.switched, 0)
 })

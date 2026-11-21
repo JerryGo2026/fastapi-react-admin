@@ -28,9 +28,12 @@ appId: com.fastapireactadmin.mobile
     timeout: 10000
 
 # 连不上的地址：探测失败要说出来，而且不能存
+# 🔴 先点清空再输，不用 eraseText：输入框预填了当前地址，tapOn 把光标落在中间，
+# 退格只删光标前半截 —— CI 上拼出过 `http://127.0.0.1:8001001`（端口非法、保存键一直灰）
+- tapOn:
+    id: server-clear
 - tapOn:
     id: server-input
-- eraseText: 100
 - inputText: http://10.0.2.2:9
 - hideKeyboard
 - tapOn:
@@ -41,9 +44,12 @@ appId: com.fastapireactadmin.mobile
     timeout: 30000
 
 # 连得上的地址：存下来、回到登录屏
+# 🔴 先点清空再输，不用 eraseText：输入框预填了当前地址，tapOn 把光标落在中间，
+# 退格只删光标前半截 —— CI 上拼出过 `http://127.0.0.1:8001001`（端口非法、保存键一直灰）
+- tapOn:
+    id: server-clear
 - tapOn:
     id: server-input
-- eraseText: 100
 - inputText: http://127.0.0.1:8001
 - hideKeyboard
 - tapOn:
