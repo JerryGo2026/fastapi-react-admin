@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any
 
 from fastapi import Request
@@ -518,7 +519,7 @@ class UserService:
 
         # 🔴 没有密码的账号（第三方登录建的）没有旧密码可验，**不能因此放行**（#402）：
         # 只拿着一枚 access token 的人就能给他设一个长期密码。改由「重新走一遍已绑定的第三方授权」
-        # 确认身份（`password_set_grant`），凭据在下面真正写入之前才消费
+        # 确认身份（`password_set_grant`），凭据在提交成功之后才消费
         if user.password and not (obj.old_password and password_verify(obj.old_password, user.password)):
             raise errors.RequestError(msg=t('error.user.wrong_old_password'))
         if not user.password and not await password_set_grant.is_granted(user_id, session_uuid):
@@ -528,18 +529,22 @@ class UserService:
             raise errors.RequestError(msg=t('error.user.password_mismatch'))
 
         await validate_new_password(db, user_id, obj.new_password)
-        # 复杂度等校验都过了才消费（被拒不用重跑一遍第三方授权）；GETDEL 原子，并发只有一个拿得到
-        if not user.password and not await password_set_grant.consume(user_id, session_uuid):
-            raise errors.RequestError(msg=t('error.user.password_set_requires_reauth'))
         # 旧 hash 要在改之前抓住 —— 理由同 `reset_password`（同一个 ORM 实例）
         previous_password = user.password
-        count = await user_dao.reset_password(db, user_id, obj.new_password)
-
-        # 没有密码的账号（第三方登录建的）没有旧密码可记（#402：原来 `password=None` 在这里抛 ValidationError）
-        if previous_password:
-            history_obj = CreateUserPasswordHistoryParam(user_id=user.id, password=previous_password)
-            await password_security_service.save_password_history(db, history_obj)
-        await user_dao.update_password_changed_time(db, user.id)
+        # 复杂度等校验都过了才占凭据（被拒不用重跑一遍第三方授权）。🔴 只占不删，提交成功之后才删（#437）：
+        # 写库 / 提交失败时凭据还在，不用重跑授权；占位是 SET NX，并发只有一个拿得到
+        holding = (
+            nullcontext()
+            if previous_password
+            else password_set_grant.held(db, background_tasks, user_id=user_id, session_uuid=session_uuid)
+        )
+        async with holding:
+            count = await user_dao.reset_password(db, user_id, obj.new_password)
+            # 没有密码的账号（第三方登录建的）没有旧密码可记（#402：原来 `password=None` 在这里抛 ValidationError）
+            if previous_password:
+                history_obj = CreateUserPasswordHistoryParam(user_id=user.id, password=previous_password)
+                await password_security_service.save_password_history(db, history_obj)
+            await user_dao.update_password_changed_time(db, user.id)
         # 提交之后再撤，理由同 `reset_password`（#394）
         _revoke_after_commit(background_tasks, user_id, EndReason.password_changed)
         user_cache_manager.clear(background_tasks, [user_id])

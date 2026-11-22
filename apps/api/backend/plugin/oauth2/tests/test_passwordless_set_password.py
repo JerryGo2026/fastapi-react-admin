@@ -10,20 +10,29 @@
 """
 
 import asyncio
+import time
 
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.testclient import TestClient
 
 from backend.core.conf import settings
-from backend.database.db import create_database_async_engine, create_database_async_session, get_database_url
+from backend.database.db import (
+    create_database_async_engine,
+    create_database_async_session,
+    get_database_url,
+    get_db_transaction,
+)
 from backend.plugin.oauth2.api.v1 import github as github_api
 from backend.plugin.oauth2.api.v1.github import github_client
 from backend.plugin.oauth2.state_binding import STATE_COOKIE_KEY, STATE_COOKIE_PATH
+from backend.tests.utils.db import async_test_db_session
 
 USERNAME = 'pytest_nopwd_402'
 SEED_PASSWORD = 'Tmp@123456'
@@ -328,3 +337,283 @@ def test_concurrent_unbinds_cannot_strip_the_last_login(passwordless: tuple[int,
     left = _sql('SELECT source FROM sys_user_social WHERE user_id = :pk AND deleted = 0', pk=pk)
     assert len(left) == 1, f'剩下 {left}，两次解绑的结果：{results}'
     assert sum(isinstance(r, errors.RequestError) for r in results) == 1, results
+
+
+# ---- #437 第 1 条：凭据写库成功之后才消费，并发照样只能用一次 ----
+
+
+def _eventually(predicate: Callable[[], bool], timeout: float = 2.0) -> bool:
+    """提交失败之后的回写是会话回滚钩子派出去的协程（`password_set_grant.release_on_rollback`），给它一点时间跑完"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_a_failed_write_does_not_burn_the_reauth(
+    client: TestClient, passwordless: tuple[int, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 写库途中出错，凭据不能跟着没了 —— 原来 `GETDEL` 在写库之前就消费掉，用户只能重跑一遍第三方授权"""
+    from backend.app.admin.crud.crud_user import user_dao
+    from backend.common.exception import errors
+
+    pk, headers = passwordless
+    _reauth(client, headers, monkeypatch, MY_SID)
+
+    async def boom(*_: object, **__: object) -> None:  # ruff:ignore[unused-async]
+        raise errors.ServerError(msg='test: 写库失败')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(user_dao, 'update_password_changed_time', boom)
+        assert _set_first_password(client, headers)['code'] != 200
+    assert _stored_password(pk) is None, '前置：失败的那次不该写进去'
+
+    status = client.get('/sys/users/me/password-status', headers=headers).json()['data']
+    assert status == {'has_password': False, 'reauth_verified': True}, '写库失败把凭据也消费掉了'
+    assert _set_first_password(client, headers)['code'] == 200
+    assert _stored_password(pk) is not None
+
+
+def test_a_failed_commit_does_not_burn_the_reauth(
+    client: TestClient, passwordless: tuple[int, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 业务代码都跑完了、**提交**那一步失败：service 里的 try 看不到，要靠会话回滚的钩子把凭据还回去"""
+    pk, headers = passwordless
+    _reauth(client, headers, monkeypatch, MY_SID)
+
+    async def fail_on_commit() -> AsyncGenerator[AsyncSession, None]:
+        async with async_test_db_session.begin() as db:
+            yield db
+            await db.flush()
+            raise RuntimeError('test: commit failed')
+
+    async def scenario() -> int:
+        previous = client.app.dependency_overrides[get_db_transaction]
+        client.app.dependency_overrides[get_db_transaction] = fail_on_commit
+        try:
+            transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url=str(client.base_url)) as http:
+                res = await http.put(
+                    '/sys/users/me/password', headers=headers, json={'new_password': NEW, 'confirm_password': NEW}
+                )
+                return res.status_code
+        finally:
+            client.app.dependency_overrides[get_db_transaction] = previous
+
+    assert client.portal.call(scenario) >= 400
+    assert _stored_password(pk) is None, '前置：提交失败了，密码不该在库里'
+    assert _eventually(
+        lambda: client.get('/sys/users/me/password-status', headers=headers).json()['data']['reauth_verified']
+    ), '提交失败把凭据也消费掉了'
+    assert _eventually(lambda: _set_first_password(client, headers)['code'] == 200), '凭据一直卡在「使用中」'
+    assert _stored_password(pk) is not None
+
+
+def test_concurrent_requests_still_use_the_reauth_once(
+    client: TestClient, passwordless: tuple[int, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 改成「写完再删」之后，两个并发请求不能都过了检查、都写进去
+
+    原来 `GETDEL` 原子挡住了这个；挪到写库之后，「看一眼还在 → 写 → 删」中间有窗口。
+    这里让两个请求都过完校验再往下走，复现那个交错
+    """
+    from backend.app.admin.service import user_service as user_service_module
+
+    _, headers = passwordless
+    _reauth(client, headers, monkeypatch, MY_SID)
+    original = user_service_module.validate_new_password
+    passwords = ('Nw1@first01', 'Nw1@second2')
+
+    async def scenario() -> list[dict]:
+        both_validated = asyncio.Event()
+        arrived = 0
+
+        async def validated(*args: object, **kwargs: object) -> None:
+            nonlocal arrived
+            await original(*args, **kwargs)
+            arrived += 1
+            if arrived >= 2:
+                both_validated.set()
+            try:
+                await asyncio.wait_for(both_validated.wait(), timeout=2)
+            except TimeoutError:
+                pass
+
+        transport = httpx.ASGITransport(app=client.app)
+        with monkeypatch.context() as patch:
+            patch.setattr(user_service_module, 'validate_new_password', validated)
+            async with httpx.AsyncClient(transport=transport, base_url=str(client.base_url)) as http:
+                responses = await asyncio.gather(
+                    *(
+                        http.put(
+                            '/sys/users/me/password', headers=headers, json={'new_password': p, 'confirm_password': p}
+                        )
+                        for p in passwords
+                    )
+                )
+        return [r.json() for r in responses]
+
+    results = client.portal.call(scenario)
+    assert sum(r['code'] == 200 for r in results) == 1, results
+    winner = passwords[[r['code'] for r in results].index(200)]
+    assert client.post('/auth/login/swagger', params={'username': USERNAME, 'password': winner}).status_code == 200
+
+
+def _my_session_uuid(headers: dict) -> str:
+    from backend.common.security.jwt import jwt_decode
+
+    return jwt_decode(headers['Authorization'].split(' ', 1)[1]).session_uuid
+
+
+def test_a_slow_write_cannot_let_a_second_request_reuse_the_reauth(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 占位不能比凭据先过期（#438 评审）：原来占位固定 30 秒，一次写库卡过 30 秒（锁等待），
+    同一个会话的第二个请求就能再占一次 —— 一次重新授权设两次密码，而原来的 `GETDEL` 无论写多久都只给一次。
+    这里把旧实现的租期压到 1 秒复现；现在占位跟着凭据的剩余寿命走，没有这个常量
+    """
+    from backend.app.admin.utils import password_set_grant as grant_module
+
+    monkeypatch.setattr(grant_module, 'CLAIM_SECONDS', 1, raising=False)
+    user_id, sid = 437000001, 'pytest-437-slow-write'
+
+    async def scenario() -> tuple[str | None, str | None]:
+        await grant_module.grant(user_id, sid)
+        try:
+            first = await grant_module.claim(user_id, sid)
+            await asyncio.sleep(1.3)
+            try:
+                return first, await grant_module.claim(user_id, sid)
+            except grant_module.PasswordSetBusy:
+                return first, None
+        finally:
+            await grant_module.finish(user_id, sid)
+
+    first, second = client.portal.call(scenario)
+    assert first is not None, '前置：第一次要占得到'
+    assert second is None, '第一个请求还没写完，第二个请求又占到了同一枚凭据'
+
+
+def test_a_failed_cleanup_does_not_skip_revoking_the_other_sessions(
+    client: TestClient, passwordless: tuple[int, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 提交成功之后删凭据的后台任务排在「撤全部会话」前面；它一抛，Starlette 就不跑后面的后台任务了（#438 评审）
+    —— 设完密码，拿着偷来 token 的那个会话照样活着。删凭据只是收尾（密码已经不是 NULL，凭据那条分支走不到），失败要吞掉
+    """
+    from backend.app.admin.utils import password_set_grant as grant_module
+
+    pk, headers = passwordless
+    other = OTHER_SESSION[pk]
+    _reauth(client, headers, monkeypatch, MY_SID)
+
+    real = grant_module.redis_client
+
+    class DeleteFails:
+        def __getattr__(self, name: str) -> object:
+            return getattr(real, name)
+
+        async def delete(self, *_: object) -> int:
+            raise ConnectionError('test: redis 抖了一下')
+
+    monkeypatch.setattr(grant_module, 'redis_client', DeleteFails())
+    try:
+        _set_first_password(client, headers)
+    except Exception:
+        pass
+    assert _stored_password(pk) is not None, '前置：密码要已经设上'
+    assert client.get('/sys/users/me', headers=other).status_code == 401, '改了密码，另一个会话没被撤掉'
+
+
+def test_a_second_request_while_the_first_is_writing_is_told_to_wait(
+    client: TestClient, passwordless: tuple[int, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """占位被同一会话的另一个请求拿着（双击保存）时，凭据还在 —— 不能回「请先重新验证身份」（#438 评审），
+    那正是 #437 要消灭的「白跑一遍第三方授权」
+    """
+    from backend.app.admin.utils import password_set_grant as grant_module
+
+    pk, headers = passwordless
+    _reauth(client, headers, monkeypatch, MY_SID)
+    sid = _my_session_uuid(headers)
+    token = client.portal.call(grant_module.claim, pk, sid)
+    assert token, '前置：要占得到'
+    try:
+        res = _set_first_password(client, headers)
+    finally:
+        client.portal.call(grant_module.release, pk, sid, token)
+    assert res['code'] != 200
+    assert '重新验证' not in res['msg'], res
+    assert '正在' in res['msg'], res
+    assert _set_first_password(client, headers)['code'] == 200, '放开之后要能设'
+
+
+def test_a_redis_error_while_releasing_does_not_hide_the_db_error(
+    client: TestClient, passwordless: tuple[int, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写库失败、放开占位时 Redis 也失败：报给用户 / 日志的要是写库那个错，不是 Redis 的（#438 评审）"""
+    from backend.app.admin.crud.crud_user import user_dao
+    from backend.app.admin.utils import password_set_grant as grant_module
+    from backend.common.exception import errors
+
+    _, headers = passwordless
+    _reauth(client, headers, monkeypatch, MY_SID)
+
+    async def boom(*_: object, **__: object) -> None:  # ruff:ignore[unused-async]
+        raise errors.ServerError(msg='test: 写库失败')
+
+    async def release_fails(*_: object, **__: object) -> None:  # ruff:ignore[unused-async]
+        raise ConnectionError('test: redis down')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(user_dao, 'update_password_changed_time', boom)
+        patch.setattr(grant_module, 'release', release_fails)
+        try:
+            res = _set_first_password(client, headers)
+        except ConnectionError:
+            pytest.fail('写库的错被放开占位时的 Redis 错盖掉了')
+    assert res['msg'] == 'test: 写库失败', res
+
+
+# ---- #437 第 2 条：回跳地址用 URL 解析设参数，不拼字符串 ----
+
+
+@pytest.mark.parametrize(
+    ('configured', 'expected'),
+    [
+        ('http://localhost:8888/profile', 'http://localhost:8888/profile?section=security'),
+        ('http://localhost:8888/profile?tab=a', 'http://localhost:8888/profile?tab=a&section=security'),
+        ('http://localhost:8888/profile?section=info', 'http://localhost:8888/profile?section=security'),
+        ('http://localhost:8888/profile#top', 'http://localhost:8888/profile?section=security#top'),
+        ('http://localhost:8888/profile?x=1#top', 'http://localhost:8888/profile?x=1&section=security#top'),
+        ('https://a.example/#/profile', 'https://a.example/#/profile?section=security'),
+        ('https://a.example/#/profile?section=info', 'https://a.example/#/profile?section=security'),
+    ],
+)
+def test_profile_security_url_sets_the_section_by_parsing(
+    monkeypatch: pytest.MonkeyPatch, configured: str, expected: str
+) -> None:
+    """配置里已经带着 `#` 或 `section=` 时，原来的字符串拼接会落到错的面板（或者参数跑进 hash 后面没人读）"""
+    from backend.plugin.oauth2.state_binding import profile_security_url
+
+    monkeypatch.setattr(settings, 'OAUTH2_FRONTEND_BINDING_REDIRECT_URI', configured)
+    assert profile_security_url() == expected
+
+
+@pytest.mark.parametrize(
+    ('configured', 'expected'),
+    [
+        ('http://localhost:8888/oauth2/callback', 'http://localhost:8888/oauth2/callback?mfa=tok&setup=1'),
+        ('https://a.example/oauth2/callback?from=sso', 'https://a.example/oauth2/callback?from=sso&mfa=tok&setup=1'),
+        ('https://a.example/#/oauth2/callback', 'https://a.example/#/oauth2/callback?mfa=tok&setup=1'),
+    ],
+)
+def test_login_redirect_sets_params_by_parsing(monkeypatch: pytest.MonkeyPatch, configured: str, expected: str) -> None:
+    """登录落地页（失败原因 / MFA 第二步）同一类拼接 bug（#438 评审）：带 `?from=sso` 时拼成 `?from=sso?mfa=...`，
+    前端读不到 MFA 令牌、第二步接不下去
+    """
+    from backend.plugin.oauth2.state_binding import login_redirect_url
+
+    monkeypatch.setattr(settings, 'OAUTH2_FRONTEND_LOGIN_REDIRECT_URI', configured)
+    assert login_redirect_url(mfa='tok', setup='1') == expected

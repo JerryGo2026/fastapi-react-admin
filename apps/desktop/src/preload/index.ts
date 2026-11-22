@@ -97,6 +97,7 @@ const bridge: DesktopBridge = {
   updater: {
     check: () => call(IPC.updaterCheck),
     quitAndInstall: () => call(IPC.updaterQuitAndInstall),
+    downloaded: () => call(IPC.updaterDownloaded),
     on: (handler: (event: UpdaterEvent) => void) => subscribe(IPC.updaterEvent, handler),
   },
 }

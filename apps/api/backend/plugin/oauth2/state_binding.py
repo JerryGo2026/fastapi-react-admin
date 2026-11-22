@@ -29,7 +29,7 @@ authorize 时没有登录态可以核对（顶层跳转带不了 Bearer 头）�
 import json
 import uuid
 
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import Request, Response
 from fastapi_oauth20.oauth20 import OAuth20Base
@@ -132,8 +132,7 @@ async def callback_failed(request: Request, db: AsyncSession, exc: errors.BaseEx
     看到的就是正常返回、照样 commit —— 抛错之前写了一半的东西会被提交
     """
     await db.rollback()
-    query = urlencode({'error': exc.msg or ''})
-    redirect = RedirectResponse(url=f'{settings.OAUTH2_FRONTEND_LOGIN_REDIRECT_URI}?{query}')
+    redirect = RedirectResponse(url=login_redirect_url(error=exc.msg or ''))
     clear_state_cookie(redirect, request)
     return redirect
 
@@ -143,9 +142,35 @@ def profile_security_url() -> str:
 
     原来只回 `OAUTH2_FRONTEND_BINDING_REDIRECT_URI`（个人中心默认的「资料」面板），
     第三方账号那一块在「安全」里，回来还要自己再点一下
+
+    🔴 **解析后设参数，不拼字符串**（#437）：配置里已经带着 `section=`，拼出来是两个 `section`、
+    前端读到第一个（错的面板）；带着 `#` 时 `?section=` 被拼进 hash 后面，路由根本读不到。
+    hash 路由（`#/profile`）的参数在 hash 里
     """
-    base = settings.OAUTH2_FRONTEND_BINDING_REDIRECT_URI
-    return f'{base}{"&" if "?" in base else "?"}section=security'
+    return _with_query(settings.OAUTH2_FRONTEND_BINDING_REDIRECT_URI, section='security')
+
+
+def login_redirect_url(**params: str) -> str:
+    """回前端登录落地页（失败原因 / MFA 第二步）：同 `profile_security_url`，解析后设参数（#438 评审）
+
+    原来是 `f'{LOGIN_REDIRECT_URI}?{query}'`：配置里带着 `?from=sso` 时拼成 `?from=sso?error=...`，
+    前端读不到 `error` / `mfa`（MFA 令牌丢了、第二步接不下去）；带 `#` 时参数跑进 hash
+    """
+    return _with_query(settings.OAUTH2_FRONTEND_LOGIN_REDIRECT_URI, **params)
+
+
+def _with_query(url: str, **params: str) -> str:
+    """给 URL 设查询参数：同名的覆盖，别的保留；`#/...` 形状的 hash 路由把参数设进 hash"""
+
+    def merged(query: str) -> str:
+        pairs = [(k, v) for k, v in parse_qsl(query, keep_blank_values=True) if k not in params]
+        return urlencode([*pairs, *params.items()])
+
+    parts = urlsplit(url)
+    if parts.fragment.startswith('/'):
+        route, _, route_query = parts.fragment.partition('?')
+        return urlunsplit(parts._replace(fragment=f'{route}?{merged(route_query)}'))
+    return urlunsplit(parts._replace(query=merged(parts.query)))
 
 
 async def authorize_redirect(
