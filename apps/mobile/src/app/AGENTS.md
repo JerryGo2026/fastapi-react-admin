@@ -73,8 +73,8 @@
 - ⚠️ 不先请求相册权限：Android 13+ 的系统照片选择器、iOS 14+ 的 PHPicker 都不需要。
   `app.json` 里插件把 `cameraPermission` / `microphonePermission` 显式关掉 ——
   不关的话独立打包会凭空多申请相机和录音权限
-- ⚠️ **只验过打包（`expo export`）和类型，没在设备上跑过** —— 选图、裁剪、
-  multipart 实际发出去的样子都待真机验收
+- 🔴 **multipart 上传走 `api.sendUpload`（XHR），不走 `sendRaw`（`fetch`）**：Expo 57 的全局 `fetch` 是 `expo/fetch`，不认 RN 的 `{ uri }` 文件描述，
+  报成「连不上服务器 … Unsupported FormDataPart implementation」。⚠️ 只在 CI 模拟器上自动跑过，真机 / iOS 没验 —— 两条都见 [`e2e/` 分册](../../e2e/AGENTS.md)「换头像」
 
 ### `is_staff` 这道闸门**不影响**个人中心
 

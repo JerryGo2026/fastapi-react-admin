@@ -170,3 +170,37 @@ workflow 在装包之后加了一句 `adb reverse`，流程里填 `http://127.0.
 根因：表单预填了当前地址，`tapOn` 把光标落在文字中间（不是末尾），`eraseText` 发的是退格，只删光标**前面**那半截，后半截 `001` 留着、新输入插在它前面。
 修法：表单加了「清空」按钮（`server-clear`，Android 没有 iOS 的 `clearButtonMode`，真人也用得上），流程里先点它再点输入框输入。
 实测证据：run 44919992820 的 `maestro-debug` 里 `server-from-login/screenshots/step-021-*.png`。
+
+## 「换头像」要过系统照片选择器和裁剪页（#381）
+
+`flows/profile-avatar.yaml`：我的 → 资料 → 编辑 → 从相册选择 → 系统照片选择器 → 裁剪页 → 上传 → 图真的加载出来。
+模拟器的相册原本是空的，workflow 在跑 Maestro 前执行 `seed-gallery.sh`：`adb push` 一张 PNG 到
+`/sdcard/Pictures/` → `MEDIA_SCANNER_SCAN_FILE` 广播 → 回查 MediaStore，查不到就当场红
+（否则照片选择器是空的，流程在系统界面上干等到超时，报的是「`icon_thumbnail` 不可见」）。
+实测：API 34 AOSP 镜像上广播之后第 1 次查询就查到了。⚠️ 多行逻辑放脚本里，是因为
+android-emulator-runner 的 `script:` 按它的文档是**逐行**执行的（没故意写坏验过）。
+
+系统界面没有我们的 `testID`，按 resource-id 找，**只匹配 `:id/` 后面那半**（包名随镜像变）：
+
+| 界面 | 选择器 | CI 上实际的包 / 组件（logcat） |
+|---|---|---|
+| 照片选择器（`PickVisualMedia`，API 33+） | `id: ".*:id/icon_thumbnail"`，`index: 0`（新的排最前） | `com.android.providers.media.module/…photopicker.PhotoPickerActivity`；带 Google 服务的镜像包名是 `com.google.android.providers.media.module`（没在 CI 上跑过） |
+| 裁剪页（`allowsEditing: true` → expo 包的 CanHub cropper） | `id: ".*:id/crop_image_menu_crop"` | App 自己的进程 |
+
+⚠️ 只在 API 34 上跑过。别的 API 级别的照片选择器（尤其更新的 mainline 版本）resource-id 可能不同，没验过。
+
+🔴 **断言「图真的加载出来」，不要只断言「地址换了」。** `UserAvatar` 接了 `testID`：加载成功才是
+`<testID>-loaded`，加载中 `-image`，出首字 `-fallback`。地址换成一张裂图（比如私有文件的下载地址）时
+首字照样兜着，只看地址的话流程照绿。`setup.mjs` 先把 admin 的头像清成 `null`，流程开头断言 `-fallback`，
+重跑时起点一致。
+
+**这条流程第一次跑就抓到了一个真 bug**：上传本身是坏的。
+- 症状：选图、裁剪都过了，回到编辑屏是 toast「Avatar upload failed · Can't reach the server
+  (http://10.0.2.2:8001): Unsupported FormDataPart implementation」，看着像网络问题
+- 根因：Expo 57 把全局 `fetch` 换成了 `expo/fetch`，它的 multipart 编码不认 RN 的 `{ uri, name, type }`
+  文件描述（expo 包 winter 目录下 runtime.native 换的 `fetch`，convertFormData 里抛的错）；
+  客户端把抛出的错包成了网络错误。`lib/avatar.ts` 原来走的是 `sendRaw`（`fetch`）
+- 修法：改走 `api.sendUpload`（XHR，RN 自己的网络层），和审批附件同一条路
+- 实测证据：PR #439 第一轮 run 44965454415，`profile-avatar` 红在 `toast-success`，`maestro-debug` 里
+  `profile-avatar/screenshots/step-026-*.png` 是那句报错（选图、裁剪两步在 commands.json 里都是 `COMPLETED`）；
+  修完的 run 44966902550 四条流程全过，`profile-avatar` 39 秒
