@@ -98,7 +98,7 @@ export default function EditProfileScreen() {
       <ScrollView contentContainerClassName="gap-4 py-4" keyboardShouldPersistTaps="handled">
         <Group>
           <Row first className="gap-3.5 py-3">
-            <UserAvatar name={user.nickname || user.username} src={user.avatar} size={56} />
+            <UserAvatar name={user.nickname || user.username} src={user.avatar} size={56} testID="edit-avatar-preview" />
             <View className="flex-1 items-start gap-1">
               {/*
                * 🔴 上传接口挂着 `sys:file:upload`，而且是 POST —— 还要过 `is_staff` 那道闸

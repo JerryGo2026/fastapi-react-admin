@@ -54,7 +54,7 @@ export default function ProfileScreen() {
     >
       <BrandTop>
         <Pressable onPress={() => router.push('/profile/info')} testID="profile-header" className="flex-row items-center gap-3.5 pt-1">
-          <UserAvatar name={user.nickname || user.username} src={user.avatar} size={56} />
+          <UserAvatar name={user.nickname || user.username} src={user.avatar} size={56} testID="profile-avatar" />
           <View className="flex-1 gap-0.5">
             <Text className="text-lg font-semibold" testID="profile-nickname">
               {user.nickname || user.username}
