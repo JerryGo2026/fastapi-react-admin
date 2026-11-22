@@ -1067,6 +1067,7 @@
   "头像保存失败": "Could not save the avatar",
   "头像地址": "Avatar URL",
   "头像地址留空表示清除；也可以直接粘贴一个已有的图片地址。": "Leave the avatar URL empty to remove it, or paste an existing image URL.",
+  "头像已保存，但刷新资料失败": "Avatar saved, but refreshing your profile failed",
   "头像已更新": "Avatar updated",
   "头像预览": "Avatar preview",
   "如 __dept_id__（模板字段）": "e.g. __dept_id__ (template field)",

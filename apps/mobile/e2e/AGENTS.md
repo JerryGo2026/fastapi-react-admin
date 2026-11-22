@@ -192,7 +192,8 @@ android-emulator-runner 的 `script:` 按它的文档是**逐行**执行的（�
 🔴 **断言「图真的加载出来」，不要只断言「地址换了」。** `UserAvatar` 接了 `testID`：加载成功才是
 `<testID>-loaded`，加载中 `-image`，出首字 `-fallback`。地址换成一张裂图（比如私有文件的下载地址）时
 首字照样兜着，只看地址的话流程照绿。`setup.mjs` 先把 admin 的头像清成 `null`，流程开头断言 `-fallback`，
-重跑时起点一致。
+所以起点一致的前提是**每次 `maestro test` 之前都先跑一遍 `setup.mjs`**（CI 是这么跑的）—— 这条流程自己会留下一张头像，
+不跑 setup 直接再跑一遍，开头那句 `-fallback` 当场红。
 
 **这条流程第一次跑就抓到了一个真 bug**：上传本身是坏的。
 - 症状：选图、裁剪都过了，回到编辑屏是 toast「Avatar upload failed · Can't reach the server
@@ -204,3 +205,9 @@ android-emulator-runner 的 `script:` 按它的文档是**逐行**执行的（�
 - 实测证据：PR #439 第一轮 run 44965454415，`profile-avatar` 红在 `toast-success`，`maestro-debug` 里
   `profile-avatar/screenshots/step-026-*.png` 是那句报错（选图、裁剪两步在 commands.json 里都是 `COMPLETED`）；
   修完的 run 44966902550 四条流程全过，`profile-avatar` 39 秒
+- 单测守住「走哪条传输」：`apps/mobile/tests/avatar-upload.test.mjs`（`sendRaw` 桩一碰就红）。
+  换回修前的 `avatar.ts`：前两条红在 `sendRaw` 桩上、修后 3 条全绿（2026-11-22 本机 `node --test`）
+- ⚠️ 改走 XHR 的代价：`onerror` 原来只给一句 `upload failed`。RN 的 XHR 失败时把原生层的错误原文放在
+  `responseText` 里（读 react-native 网络层 XMLHttpRequest 的 `__didCompleteResponse`），
+  `sendUpload` 现在把它带进报错（`packages/api/src/client.test.ts`「sendUpload network failure reason」，修前红）。
+  ⚠️ 真机上原生层给的原文长什么样没看过

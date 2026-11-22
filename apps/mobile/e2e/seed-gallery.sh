@@ -17,8 +17,10 @@ adb push "$SRC" "$DST"
 adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$DST"
 
 for i in $(seq 1 15); do
-  if adb shell content query --uri content://media/external/images/media --projection _display_name \
-    | grep -q e2e-avatar.png; then
+  # 先收进变量再 grep：管道里的 `grep -q` 一命中就退出，adb 还在写的话吃 SIGPIPE（141），
+  # `pipefail` 会把整条判成假 —— 图明明在索引里，却在相册有别的图时报「查不到」
+  out=$(adb shell content query --uri content://media/external/images/media --projection _display_name || true)
+  if grep -q e2e-avatar.png <<<"$out"; then
     echo "相册里有测试图了（第 $i 次查询）"
     exit 0
   fi

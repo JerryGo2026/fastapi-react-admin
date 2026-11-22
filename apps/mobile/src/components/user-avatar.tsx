@@ -35,14 +35,20 @@ export function UserAvatar({
   // 按地址记「加载成功」：换了地址就回到未加载，不会拿上一张图的状态冒充新图
   const [loadedSrc, setLoadedSrc] = React.useState<string | null>(null)
   const loaded = !!src && loadedSrc === src
+  /*
+   * ⚠️ `source` 要按地址记住：原语的 layout effect 依赖 `[props.source]`，每次换新对象都会先置 `error`
+   * 再置 `loading`（读 `@rn-primitives/avatar` 源码）。上面的 `setLoadedSrc` 正好在 `onLoad` 之后多触发一次
+   * 渲染 → 原语从 `loaded` 退回 `loading`；地址坏掉时父屏每敲一个字都会重挂 `<Image>` 再请求一遍、首字闪一下
+   */
+  const source = React.useMemo(() => (src ? { uri: src } : undefined), [src])
   return (
     <Avatar alt={name} style={{ width: size, height: size, borderRadius: radius }} testID={testID}>
-      {src ? (
+      {src && source ? (
         <AvatarImage
           // 🔴 `key` 不能省：原语里 `onLoadingStatusChange` 被 `useCallback` 按 `onLoad` 缓存住，
           // 地址变了而组件不重挂的话，回调里的 `src` 还是上一张的（读源码得出，没单独验过）
           key={src}
-          source={{ uri: src }}
+          source={source}
           onLoadingStatusChange={(s) => setLoadedSrc(s === 'loaded' ? src : null)}
           testID={testID ? `${testID}-${loaded ? 'loaded' : 'image'}` : undefined}
         />
