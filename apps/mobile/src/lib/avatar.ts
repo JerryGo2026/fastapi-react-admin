@@ -1,4 +1,3 @@
-import { resolveEnvelope } from '@admin/api'
 import { t } from '@admin/i18n'
 import * as ImagePicker from 'expo-image-picker'
 
@@ -62,15 +61,20 @@ export async function uploadAvatar(asset: ImagePicker.ImagePickerAsset): Promise
   // RN 的 FormData 收的是 `{ uri, name, type }` 描述对象，不是 Blob —— 原生层按 uri 读文件
   form.append('file', { uri: asset.uri, name: `avatar.${ext}`, type: mime } as unknown as Blob)
 
-  const res = await api.sendRaw('POST', '/api/v1/sys/files/upload?public=true', form, 'application/json')
-  // 🔴 成功路径也要过信封：FBA 的 `fail()` 是 HTTP 200 + `code: 400`，只看 `res.ok` 会把被拒的上传当成功
-  const outcome = resolveEnvelope<UploadedImage>(res, await res.json().catch(() => null))
-  if (!outcome.ok) throw outcome.error
-  if (!outcome.data.public_url) {
+  /*
+   * 🔴 **走 `sendUpload`（XHR），不能走 `sendRaw`（`fetch`）。** Expo 57 的 winter 运行时把全局
+   * `fetch` 换成了 `expo/fetch`，它的 multipart 编码只认字符串 / Blob / 带 `bytes()` 的文件对象，
+   * 上面那种 `{ uri, name, type }` 描述对象直接抛 `Unsupported FormDataPart implementation` ——
+   * 被客户端包成「连不上服务器」，看着像网络问题（#381，CI 模拟器上的 Maestro 流程第一次跑就红在这）。
+   * XHR 走的还是 RN 自己的网络层，认 `uri`。审批附件（`lib/workflow.ts`）一直走的这条。
+   * 信封（HTTP 200 + `code: 400` 也算失败）由 `sendUpload` 判。
+   */
+  const data = await api.sendUpload<UploadedImage>('/api/v1/sys/files/upload?public=true', form)
+  if (!data.public_url) {
     throw new Error(t('上传成功但没有拿到直链，请检查后端 /uploads 挂载'))
   }
 
-  const url = `${serverStore.current()}${outcome.data.public_url}`
+  const url = `${serverStore.current()}${data.public_url}`
   await api.PUT('/api/v1/sys/users/me/avatar', { body: { avatar: url } })
   return url
 }

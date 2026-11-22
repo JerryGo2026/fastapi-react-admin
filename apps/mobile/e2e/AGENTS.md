@@ -10,6 +10,8 @@ subflows/login.yaml  冷启动 → 清登录态 → 账号密码登录（两条�
 flows/admin-users.yaml   登录 → 应用页 → 用户列表翻页 → 搜索 → 详情 → 删除确认 → toast
 flows/perm-gate.yaml     没角色的账号：应用页没有「用户」，并且明说「没有授权」
 flows/server-from-login.yaml  没登录时在登录屏换服务器（#406）：坏地址报错 → 好地址保存 → 用新地址登录
+flows/profile-avatar.yaml     个人中心从相册换头像（#381）：系统照片选择器 → 裁剪 → 上传 → 图真的加载出来
+seed-gallery.sh      往模拟器相册推一张图（fixtures/e2e-avatar.png）+ 媒体扫描 + 回查 MediaStore
 ```
 
 跑的地方是 `.github/workflows/mobile-e2e.yml`（#137）：起后端（和 `.github/workflows/ci.yml` 里
