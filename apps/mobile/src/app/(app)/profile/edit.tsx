@@ -49,10 +49,18 @@ export default function EditProfileScreen() {
     setUploading(true)
     try {
       const url = await uploadAvatar(asset)
-      await reload()
       // 地址框跟着换成新地址，否则 `avatarChanged` 为真、保存按钮亮着，像是还有没存的改动
       setAvatar(url)
-      toast.success(t('头像已更新'))
+      /*
+       * ⚠️ 走到这里头像已经写进服务端了，`reload()` 失败不能再报「上传失败」——
+       * 用户会以为没传上去、再传一张，服务器上多一个孤儿文件。单独说清是「刷新」没成
+       */
+      try {
+        await reload()
+        toast.success(t('头像已更新'))
+      } catch (err) {
+        toast.error(t('头像已保存，但刷新资料失败'), { description: err instanceof Error ? err.message : String(err) })
+      }
     } catch (err) {
       toast.error(t('头像上传失败'), { description: err instanceof Error ? err.message : String(err) })
     } finally {
@@ -98,7 +106,7 @@ export default function EditProfileScreen() {
       <ScrollView contentContainerClassName="gap-4 py-4" keyboardShouldPersistTaps="handled">
         <Group>
           <Row first className="gap-3.5 py-3">
-            <UserAvatar name={user.nickname || user.username} src={user.avatar} size={56} />
+            <UserAvatar name={user.nickname || user.username} src={user.avatar} size={56} testID="edit-avatar-preview" />
             <View className="flex-1 items-start gap-1">
               {/*
                * 🔴 上传接口挂着 `sys:file:upload`，而且是 POST —— 还要过 `is_staff` 那道闸

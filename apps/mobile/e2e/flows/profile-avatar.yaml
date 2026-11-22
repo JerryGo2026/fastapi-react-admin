@@ -1,0 +1,79 @@
+# #381（#117 那条「从相册选头像」）：个人中心 → 资料 → 编辑 → 从相册选择 → 系统照片选择器
+# 选图 → 裁剪页确认 → 上传 → 头像真的加载出来。
+#
+# 相册里那张图是 workflow 在跑 Maestro 之前 `adb push` 进去、再触发媒体扫描的
+# （`apps/mobile/e2e/fixtures/e2e-avatar.png`）—— 模拟器的相册原本是空的。
+#
+# 选择器和裁剪页都是**系统 / 原生界面**，没有我们的 testID，只能按 resource-id 找：
+#   - 照片选择器（API 33+，`PickVisualMedia`）：MediaProvider 模块的缩略图 `…:id/icon_thumbnail`。
+#     包名 AOSP 镜像是 `com.android.providers.media.module`、带 Google 服务的是
+#     `com.google.android.providers.media.module`，所以只匹配 `:id/` 后面那半
+#   - 裁剪页（`allowsEditing: true` → expo 包的 CanHub cropper）：菜单项 `…:id/crop_image_menu_crop`
+appId: com.fastapireactadmin.mobile
+---
+- runFlow:
+    file: ../subflows/login.yaml
+    env:
+      USERNAME: admin
+      PASSWORD: "123456"
+
+- tapOn:
+    id: tab-profile
+- tapOn:
+    id: profile-header
+- tapOn:
+    id: profile-info-edit
+# 按钮要等权限码问回来才出现（`perm.canWrite('sys:file:upload')`）
+- extendedWaitUntil:
+    visible:
+      id: edit-avatar-pick
+    timeout: 15000
+# 起点：还没有图（`setup.mjs` 把 admin 的头像清空了），出的是首字
+- assertVisible:
+    id: edit-avatar-preview-fallback
+
+- tapOn:
+    id: edit-avatar-pick
+
+# ── 系统照片选择器 ──────────────────────────────────────────────────────
+- extendedWaitUntil:
+    visible:
+      id: ".*:id/icon_thumbnail"
+    timeout: 20000
+# 相册里只有 workflow 推进去的那一张，新的排最前
+- tapOn:
+    id: ".*:id/icon_thumbnail"
+    index: 0
+
+# ── 裁剪页 ──────────────────────────────────────────────────────────────
+- extendedWaitUntil:
+    visible:
+      id: ".*:id/crop_image_menu_crop"
+    timeout: 20000
+- tapOn:
+    id: ".*:id/crop_image_menu_crop"
+
+# ── 回到编辑屏：上传成功 ────────────────────────────────────────────────
+- extendedWaitUntil:
+    visible:
+      id: toast-success
+    timeout: 30000
+# 地址框换成了公开子树的直链（不是私有文件的下载地址）
+- assertVisible:
+    id: edit-avatar
+    text: ".*/uploads/.+"
+# 图真的从那个地址加载出来了 —— 只看地址换没换的话，裂图也会过（首字兜着）
+- extendedWaitUntil:
+    visible:
+      id: edit-avatar-preview-loaded
+    timeout: 20000
+- assertNotVisible:
+    id: edit-avatar-preview-fallback
+
+# 「我的」页顶部那张也换了（`reload()` 刷新了会话里的用户）
+- back
+- back
+- extendedWaitUntil:
+    visible:
+      id: profile-avatar-loaded
+    timeout: 20000

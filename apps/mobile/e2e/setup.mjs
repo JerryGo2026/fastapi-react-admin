@@ -84,6 +84,12 @@ const now = (await call('GET', '/api/v1/sys/configs/all?type=LOGIN')).data.find(
 if (now !== 'false') fail(`验证码开关写完回读还是 ${now}`)
 log('验证码已关')
 
+// ── admin 的头像清回空 ──────────────────────────────────────────────────
+// 「换头像」那条流程（#381）先断言「还没有图」再去选图：同一个库上重跑时上一轮传的图还挂着，
+// 不清的话「换完出图了」那一步不用换也成立。🔴 清空发 `null`，不能发 `''`（见 src/app 分册）
+await call('PUT', '/api/v1/sys/users/me/avatar', { avatar: null })
+log('admin 头像已清空')
+
 // ── 测试数据 ────────────────────────────────────────────────────────────
 const depts = (await call('GET', '/api/v1/sys/depts')).data
 if (!depts?.length) fail('一个部门都没有，建不了用户')

@@ -454,7 +454,15 @@ export function createApiClient<Paths extends {}>(config: ApiClientConfig): ApiC
       }
       xhr.onerror = () => {
         cleanup()
-        reject(networkError(new Error('upload failed'), path))
+        // RN 的 XHR 失败时把原生层的错误原文（DNS / TLS / 明文被拦…）放进 `responseText`，
+        // 浏览器那边是空串。带上它 —— 否则移动端只剩一句没有线索的 `upload failed`（#381）
+        let reason = ''
+        try {
+          reason = typeof xhr.responseText === 'string' ? xhr.responseText.trim() : ''
+        } catch {
+          // responseType 不是文本时 getter 会抛
+        }
+        reject(networkError(new Error(reason || 'upload failed'), path))
       }
       xhr.onabort = () => {
         cleanup()

@@ -98,3 +98,42 @@ describe('refresh identity boundary (#324)', () => {
     expect(s.sent).toHaveLength(1)
   })
 })
+
+describe('sendUpload network failure reason (#381)', () => {
+  /** 只造 `sendUpload` 用到的那几样；`send()` 之后触发 onerror */
+  function stubXhr(responseText: string) {
+    class FakeXhr {
+      upload = {} as { onprogress?: unknown }
+      withCredentials = false
+      responseText = ''
+      onerror: (() => void) | null = null
+      open() {}
+      setRequestHeader() {}
+      abort() {}
+      send() {
+        // RN 的 XHR 在网络失败时把原生层的错误原文放进 responseText（浏览器上是空串）
+        this.responseText = responseText
+        queueMicrotask(() => this.onerror?.())
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+  }
+  const client = () =>
+    createApiClient<TestPaths>({
+      getBaseUrl: () => 'http://10.0.2.2:8001', getLanguage: () => 'en-US',
+      getToken: () => null, setToken: () => {}, clearToken: () => {},
+    })
+
+  it('carries the native error text RN puts in responseText', async () => {
+    stubXhr('Unable to resolve host "10.0.2.2"')
+    await expect(client().sendUpload('/up', new FormData())).rejects.toMatchObject({
+      isNetwork: true,
+      message: expect.stringContaining('Unable to resolve host'),
+    })
+  })
+
+  it('falls back to a generic reason when there is none (browsers)', async () => {
+    stubXhr('')
+    await expect(client().sendUpload('/up', new FormData())).rejects.toMatchObject({ isNetwork: true, message: 'upload failed' })
+  })
+})
