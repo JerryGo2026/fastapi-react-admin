@@ -25,7 +25,7 @@ import backend.main  # ruff: ignore[unused-import]
 from backend.common.model import MappedBase
 from backend.core import path_conf
 from backend.core.path_conf import BASE_PATH
-from backend.database.db import get_database_url
+from backend.database.db import get_database_url, register_mssql_datetimeoffset
 
 if not os.path.exists(path_conf.ALEMBIC_VERSION_DIR):
     os.makedirs(path_conf.ALEMBIC_VERSION_DIR)
@@ -122,6 +122,8 @@ async def run_async_migrations() -> None:
         prefix='sqlalchemy.',
         poolclass=pool.NullPool,
     )
+    # 迁移里读时间列（数据迁移按业务键查行）同样会撞上 #442 的竞态
+    register_mssql_datetimeoffset(connectable)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

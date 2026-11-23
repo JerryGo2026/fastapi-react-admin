@@ -1,3 +1,5 @@
+import datetime
+import struct
 import sys
 
 from collections.abc import AsyncGenerator, Mapping
@@ -74,6 +76,48 @@ def get_database_url(*, unittest: bool = False, with_database: bool = True) -> U
     )
 
 
+# SQL Server 的 DATETIMEOFFSET 在 ODBC 里是 -155（SQLNCLI.h 的 SQL_SS_TIMESTAMPOFFSET）
+_MSSQL_SQL_SS_TIMESTAMPOFFSET = -155
+
+
+def _datetimeoffset_from_odbc(value: bytes | None) -> datetime.datetime | None:
+    """DATETIMEOFFSET 的原始字节 → 带时区的 datetime（与 SQLAlchemy mssql+pyodbc 方言自带的转换器相同）"""
+    if value is None:
+        return None
+    year, month, day, hour, minute, second, fraction, tz_hour, tz_minute = struct.unpack('<6hI2h', value)
+    return datetime.datetime(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        fraction // 1000,
+        datetime.timezone(datetime.timedelta(hours=tz_hour, minutes=tz_minute)),
+    )
+
+
+def register_mssql_datetimeoffset(engine: AsyncEngine) -> None:
+    """新连接建好时**同步**注册 DATETIMEOFFSET 的转换器（#442）。
+
+    🔴 SQLAlchemy 的方言在 `on_connect` 里也注册，但走 aioodbc 时那一步被丢进线程池，
+    返回的 future 没人等（aioodbc 适配层的 `add_output_converter` 没有 `await_`）。
+    这条连接上的第一条查询可能先于注册执行，读到时间列就是 `ODBC SQL type -155`。
+    这里直接对底层 pyodbc 连接调一次：此时连接上还没有任何查询。见 `database/AGENTS.md`。
+    """
+    if engine.dialect.name != 'mssql':
+        return
+
+    def _on_connect(dbapi_connection: Any, _record: Any) -> None:
+        # SQLAlchemy 的异步适配层 → aioodbc.Connection → pyodbc.Connection
+        raw = getattr(getattr(dbapi_connection, '_connection', None), '_conn', None)
+        if raw is None:
+            return
+        raw.add_output_converter(_MSSQL_SQL_SS_TIMESTAMPOFFSET, _datetimeoffset_from_odbc)
+
+    event.listen(engine.sync_engine, 'connect', _on_connect)
+
+
 def create_database_async_engine(url: str | URL) -> AsyncEngine:
     """
     创建数据库异步引擎
@@ -82,7 +126,7 @@ def create_database_async_engine(url: str | URL) -> AsyncEngine:
     :return:
     """
     try:
-        return create_async_engine(
+        engine = create_async_engine(
             url,
             echo=settings.DATABASE_ECHO,
             echo_pool=settings.DATABASE_POOL_ECHO,
@@ -98,6 +142,8 @@ def create_database_async_engine(url: str | URL) -> AsyncEngine:
     except Exception as e:
         log.error(f'数据库连接失败 {e}')
         sys.exit()
+    register_mssql_datetimeoffset(engine)
+    return engine
 
 
 class DatabaseAsyncSessionMaker:
