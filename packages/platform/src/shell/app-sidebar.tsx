@@ -22,8 +22,21 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   SidebarRail,
+  useSidebar as useSidebarLayout,
 } from '@admin/ui/components/sidebar'
 import { Skeleton } from '@admin/ui/components/skeleton'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuLabel,
+  DropdownMenuLinkItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from '@admin/ui/components/dropdown-menu'
+import { cn } from '@admin/ui/lib/utils'
 
 import { usePerm } from '../auth/use-perm'
 import { MenuIcon } from './icon-registry'
@@ -48,6 +61,8 @@ function NavItem({
   nested?: boolean
 }) {
   const { t } = useTranslation()
+  const { state, isMobile } = useSidebarLayout()
+  const railMode = state === 'collapsed' && !isMobile
   const hasChildren = node.children.length > 0
   const isActive = node.path === activePath
   const containsActive = React.useMemo(
@@ -67,15 +82,19 @@ function NavItem({
   const Item = nested ? SidebarMenuSubItem : SidebarMenuItem
   const ItemButton = nested ? SidebarMenuSubButton : SidebarMenuButton
   const iconClass = nested ? 'size-3.5' : undefined
+  const title = menuTitle(t, node.path, node.title)
+  // 折叠成图标栏后只剩图标：顶层叶子靠 tooltip 报名字（`tooltip` 只在折叠态显示）。子层组件没有这个 prop，
+  // 也用不着 —— 折叠态下子层只出现在浮层里（#440）
+  const tip = nested ? {} : { tooltip: title }
 
   // ── 叶子节点 ──
   if (!hasChildren) {
     if (node.external) {
       return (
         <Item>
-          <ItemButton render={<a href={node.external} target="_blank" rel="noreferrer" />}>
+          <ItemButton {...tip} render={<a href={node.external} target="_blank" rel="noreferrer" />}>
             <MenuIcon name={node.icon} className={iconClass} />
-            <span>{menuTitle(t, node.path, node.title)}</span>
+            <span>{title}</span>
             <IconExternalLink className="ms-auto size-3 opacity-50" />
           </ItemButton>
         </Item>
@@ -84,14 +103,52 @@ function NavItem({
     return (
       <Item>
         <ItemButton
+          {...tip}
           isActive={isActive}
           data-testid={`nav-${node.path}`}
           render={<Link to={node.path as never} />}
         >
           <MenuIcon name={node.icon} className={iconClass} />
-          <span>{menuTitle(t, node.path, node.title)}</span>
+          <span>{title}</span>
         </ItemButton>
       </Item>
+    )
+  }
+
+  // ── 折叠态的分组：悬停 / 点击从右侧浮出子菜单（#440） ──
+  // 🔴 不能沿用下面的 Collapsible：`SidebarMenuSub` 在 `collapsible=icon` 下是 display:none，
+  // 点了只会把 aria-expanded 翻成 true，什么都不出现 —— 折叠后 12 个一级菜单里 10 个是这种死按钮
+  if (railMode && !nested) {
+    return (
+      <SidebarMenuItem>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            openOnHover
+            delay={120}
+            closeDelay={200}
+            render={
+              <SidebarMenuButton isActive={containsActive} aria-label={title} data-testid={`nav-group-${node.title}`} />
+            }
+          >
+            <MenuIcon name={node.icon} />
+            <span>{title}</span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            side="right"
+            align="start"
+            sideOffset={8}
+            className="w-auto min-w-44"
+            data-testid={`nav-flyout-${node.title}`}
+          >
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>{title}</DropdownMenuLabel>
+              {node.children.map((c) => (
+                <FlyoutNode key={c.id} node={c} activePath={activePath} />
+              ))}
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SidebarMenuItem>
     )
   }
 
@@ -108,7 +165,7 @@ function NavItem({
       <Item>
         <CollapsibleTrigger render={<ItemButton data-testid={`nav-group-${node.title}`} />}>
           <MenuIcon name={node.icon} className={iconClass} />
-          <span>{menuTitle(t, node.path, node.title)}</span>
+          <span>{title}</span>
           <IconChevronRight className="ms-auto size-4 shrink-0 transition-transform group-data-[panel-open]/collapsible:rotate-90" />
         </CollapsibleTrigger>
         <CollapsibleContent>
@@ -120,6 +177,58 @@ function NavItem({
         </CollapsibleContent>
       </Item>
     </Collapsible>
+  )
+}
+
+/** 折叠态浮层里的一项：叶子是真链接（中键 / ⌘+点击照旧新开），分组往右级联 */
+function FlyoutNode({ node, activePath }: { node: NavNode; activePath: string }) {
+  const { t } = useTranslation()
+  const title = menuTitle(t, node.path, node.title)
+  const icon = <MenuIcon name={node.icon} className="size-3.5" />
+
+  if (node.children.length > 0) {
+    return (
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger
+          data-testid={`nav-group-${node.title}`}
+          className={cn(subtreeHasPath(node, activePath) && 'font-medium text-primary')}
+        >
+          {icon}
+          <span>{title}</span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="min-w-40">
+          {node.children.map((c) => (
+            <FlyoutNode key={c.id} node={c} activePath={activePath} />
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    )
+  }
+
+  if (node.external) {
+    return (
+      <DropdownMenuLinkItem closeOnClick render={<a href={node.external} target="_blank" rel="noreferrer" />}>
+        {icon}
+        <span>{title}</span>
+        <IconExternalLink className="ms-auto size-3 opacity-50" />
+      </DropdownMenuLinkItem>
+    )
+  }
+
+  const active = node.path === activePath
+  return (
+    // closeOnClick：LinkItem 默认点了不关（实测：跳到用户管理后浮层还挂在页面上）
+    <DropdownMenuLinkItem
+      closeOnClick
+      data-testid={`nav-${node.path}`}
+      data-active={active || undefined}
+      aria-current={active ? 'page' : undefined}
+      className={cn(active && 'font-medium text-primary')}
+      render={<Link to={node.path as never} />}
+    >
+      {icon}
+      <span>{title}</span>
+    </DropdownMenuLinkItem>
   )
 }
 

@@ -288,6 +288,15 @@ i18n key（而不是随手起新字符串），两个语言的翻译已经现成
 里点开目录只是展开子项、不会真的导航，`isValidPath` 校验只发生在
 `toNavTree()` 里，合成节点整个绕过了那条校验。
 
+### 🔴 折叠态（⌘B）的分组要走浮层，不能沿用 Collapsible（#440）
+
+**症状**：折叠成图标栏后，分组菜单点了没反应、悬停也没提示，子页面只能靠 ⌘K 进（正式环境 12 个一级菜单里 10 个）。
+**根因**：shadcn 的 `SidebarMenuSub` 带 `group-data-[collapsible=icon]:hidden`，`CollapsibleTrigger` 照样翻 `aria-expanded`，内容却是 `display:none`；shadcn 只给叶子留了 `tooltip`。
+**修法**：`state === 'collapsed' && !isMobile` 时顶层分组换成 `DropdownMenu`（`openOnHover`、`side="right"`），三级用 `DropdownMenuSub` 级联，顶层叶子补 `tooltip`，触发器 `isActive={containsActive}`。
+浮层叶子是 `DropdownMenuLinkItem` + `<Link>`，**必须 `closeOnClick`** —— LinkItem 默认不关，实测跳页后浮层还挂着。浮层 testid `nav-flyout-${title}`，只在打开时挂载。
+**实测证据**（2026-11-23）：修前 ego 在正式环境 v1.1.3 点「系统管理」，`aria-expanded="true"`、子菜单 `display:none`、`[role=menu]` 0 个。
+E2E `sidebar-collapsed.spec.ts` 3 条过；变异关掉折叠分支，浮层 / 键盘两条红。⚠️ 三级级联没有现成数据，**没在浏览器里实测过**
+
 ## 服务端推送：一条连接，事件走订阅
 
 `use-presence.ts` 建的那条 socket.io 连接**同时**是所有服务端推送的入口。
