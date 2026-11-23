@@ -5,7 +5,7 @@ import { uniqueCode } from "../utils/ids"
  * 菜单死链判定（`pages/menu/dead-link.ts`）。
  *
  * 「这条菜单的 path 在前端路由里不存在」是一种**静默故障**：菜单在库里、
- * 权限也发下去了，但 `shell/use-sidebar.ts: toNavTree` 会把它跳过 ——
+ * 权限也发下去了，但 `shell/sidebar/use-sidebar.ts: toNavTree` 会把它跳过 ——
  * 侧边栏上什么都不显示，没有任何报错，配的人以为自己配好了。
  * 菜单页那个「N 个死链」的角标是唯一替人看见它的地方，所以它本身必须有测试。
  *

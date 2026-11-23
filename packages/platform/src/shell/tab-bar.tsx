@@ -18,7 +18,7 @@ import { TabItem } from './tab-item'
 import { TabListMenu } from './tab-list-menu'
 import { TabMenu, type TabMenuTarget } from './tab-menu'
 import { isRemovable, tabIcon, useTabStore } from './tab-store'
-import { useSidebar } from './use-sidebar'
+import { useSidebar } from './sidebar/use-sidebar'
 import { tabCapabilities, useTabActions } from './use-tab-actions'
 
 /**

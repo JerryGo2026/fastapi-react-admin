@@ -16,7 +16,7 @@ import { ShortcutsDialog } from './shortcuts-dialog'
 import { isRemovable, tabIcon, useTabStore } from './tab-store'
 import { SHELL_TOUR } from './tour/shell-tour'
 import { startTour } from './tour/tour'
-import { useSidebar, type NavNode, type SidebarOptions } from './use-sidebar'
+import { useSidebar, type NavNode, type SidebarOptions } from './sidebar/use-sidebar'
 import { useMenuTitles } from './use-menu-titles'
 import { tabCapabilities, useTabActions } from './use-tab-actions'
 
