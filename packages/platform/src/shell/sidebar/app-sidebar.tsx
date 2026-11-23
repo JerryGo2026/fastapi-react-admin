@@ -38,8 +38,8 @@ import {
 } from '@admin/ui/components/dropdown-menu'
 import { cn } from '@admin/ui/lib/utils'
 
-import { usePerm } from '../auth/use-perm'
-import { MenuIcon } from './icon-registry'
+import { usePerm } from '../../auth/use-perm'
+import { MenuIcon } from '../icon-registry'
 import { useSidebar, type NavNode, type SidebarOptions } from './use-sidebar'
 
 /**
@@ -124,8 +124,10 @@ function NavItem({
         <DropdownMenu>
           <DropdownMenuTrigger
             openOnHover
+            // closeDelay 要 ≤ delay：每个分组是各自独立的菜单，不互相协调，反过来的话在相邻分组间移动时
+            // 旧浮层还没关、新浮层已经开，两个叠在一起闪一下。移进浮层靠 Base UI 的 safe polygon，不靠关闭延迟
             delay={120}
-            closeDelay={200}
+            closeDelay={100}
             render={
               <SidebarMenuButton isActive={containsActive} aria-label={title} data-testid={`nav-group-${node.title}`} />
             }

@@ -12,7 +12,7 @@ import {
   BreadcrumbSeparator,
 } from "@admin/ui/components/breadcrumb"
 
-import type { NavNode } from "./use-sidebar"
+import type { NavNode } from "./sidebar/use-sidebar"
 
 /** activePath 在导航树里的祖先链（含它自己）,找不到返回 null —— 调用方回退到 fallbackTitle */
 function findChain(nodes: NavNode[], path: string, trail: NavNode[] = []): NavNode[] | null {

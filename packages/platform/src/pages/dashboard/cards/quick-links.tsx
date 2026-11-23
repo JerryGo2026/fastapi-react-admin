@@ -4,7 +4,7 @@ import { Link } from '@tanstack/react-router'
 
 import { MenuIcon } from '../../../shell/icon-registry'
 import { QUICK_LINKS_DEFAULT, QUICK_LINKS_MAX } from '../layout'
-import type { NavNode } from '../../../shell/use-sidebar'
+import type { NavNode } from '../../../shell/sidebar/use-sidebar'
 import { CARD_ACTION_CLASS, DashboardCard } from '../card-shell'
 import type { CardProps } from './types'
 

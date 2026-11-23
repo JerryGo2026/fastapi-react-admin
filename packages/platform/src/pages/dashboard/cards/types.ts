@@ -1,7 +1,7 @@
 import type { ComponentType } from 'react'
 
 import type { CardDefault } from '../layout'
-import type { NavNode } from '../../../shell/use-sidebar'
+import type { NavNode } from '../../../shell/sidebar/use-sidebar'
 
 /** 普通函数里用的 `t` 签名（i18n 分册第 5 条：不能在普通函数里调 hook，把 `t` 传进来） */
 export type TFn = (key: string, vars?: Record<string, unknown>) => string

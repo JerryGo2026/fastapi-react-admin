@@ -12,7 +12,7 @@
 |---|---|---|---|
 | layer_violation | `core->plugins` | foundation -> feature (向上 2 层, 6 处) | `apps/api/backend/common/security/rbac.py:79`, `apps/api/backend/core/conf.py:15`, `apps/api/backend/utils/dynamic_config.py:7` |
 | layer_violation | `core->data` | foundation -> shared (向上 1 层, 5 处) | `apps/api/backend/common/security/jwt.py:15`, `apps/api/backend/common/security/jwt.py:16`, `apps/api/backend/common/security/jwt.py:247` |
-| layer_violation | `platform_shell->platform_pages` | shared -> feature (向上 1 层, 3 处) | `packages/platform/src/shell/upload-store.ts:4`, `packages/platform/src/shell/upload-tray.tsx:8`, `packages/platform/src/shell/use-sidebar.ts:11` |
+| layer_violation | `platform_shell->platform_pages` | shared -> feature (向上 1 层, 3 处) | `packages/platform/src/shell/upload-store.ts:4`, `packages/platform/src/shell/upload-tray.tsx:8`, `packages/platform/src/shell/sidebar/use-sidebar.ts:11` |
 | layer_violation | `data->plugins` | shared -> feature (向上 1 层, 2 处) | `apps/api/backend/app/admin/crud/crud_user.py:33`, `apps/api/backend/app/admin/crud/crud_user.py:471` |
 | layer_violation | `plugins->http_api` | feature -> entry (向上 1 层, 2 处) | `apps/api/backend/plugin/open/gateway/route.py:27`, `apps/api/backend/plugin/router.py:114` |
 | layer_violation | `services->worker` | feature -> entry (向上 1 层, 2 处) | `apps/api/backend/app/task/service/scheduler_service.py:57`, `apps/api/backend/app/task/service/scheduler_service.py:115` |
@@ -277,7 +277,7 @@ sequenceDiagram
 | `plugins` | `data` | import | 29 | `apps/api/backend/plugin/ai/mcp_gateway/auth.py:98` |
 | `worker` | `core` | import | 26 | `apps/api/backend/app/task/celery.py:25` |
 | `http_api` | `plugins` | import | 25 | `apps/api/backend/cli.py:50` |
-| `platform_shell` | `ui` | import | 24 | `packages/platform/src/shell/app-sidebar.tsx:8` |
+| `platform_shell` | `ui` | import | 24 | `packages/platform/src/shell/sidebar/app-sidebar.tsx:8` |
 | `web` | `ui` | import | 22 | `apps/web/src/app.tsx:9` |
 | `http_api` | `services` | import | 19 | `apps/api/backend/app/admin/api/uploads.py:27` |
 | `desktop` | `platform_shell` | import | 12 | `apps/desktop/src/main/auth.ts:5` |

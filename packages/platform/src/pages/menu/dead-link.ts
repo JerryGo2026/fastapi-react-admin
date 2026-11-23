@@ -4,7 +4,7 @@ import { MENU_TYPE, type Menu } from './api'
  * 死链判定的**唯一实现** —— 计数、行内标记、「只看死链」筛选、编辑表单的提示都用它。
  *
  * 判定口径是「**这一条会不会从侧边栏消失**」，所以规则必须跟
- * `shell/use-sidebar.ts: toNavTree` 保持一致（改一边就要改另一边）：
+ * `shell/sidebar/use-sidebar.ts: toNavTree` 保持一致（改一边就要改另一边）：
  *
  * - **按钮**：本来就不进侧边栏，只提供 perms 权限标识 → 从不算死链
  * - **外链 / 内嵌**：走 `link` 字段，不是前端路由 → 从不算死链
