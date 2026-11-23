@@ -42,7 +42,7 @@
 | **把组件库搬进别的项目** | [`packages/ui/PORTING.md`](packages/ui/PORTING.md) |
 | 加文案 / 动多语言 · **显示时间 / 动时区** | [`packages/i18n/AGENTS.md`](packages/i18n/AGENTS.md)（时间一律过 `src/datetime.ts`） |
 | **动请求客户端 / 后端契约 / 错误判定** | [`packages/api/AGENTS.md`](packages/api/AGENTS.md) |
-| 动后端模型 / 接口 / SQL · **解析上传的 xlsx** | [`apps/api/AGENTS.md`](apps/api/AGENTS.md) |
+| 动后端模型 / 接口 / SQL · **解析上传的 xlsx** · 数据库引擎 / 连接（SQL Server 偶发 -155） | [`apps/api/AGENTS.md`](apps/api/AGENTS.md) · 引擎 [`backend/database`](apps/api/backend/database/AGENTS.md) |
 | 动公共层（校验 / 异常 / 缓存 / 分页） | [`apps/api/backend/common/AGENTS.md`](apps/api/backend/common/AGENTS.md) |
 | 跑 pytest / 建测试库 / 测试跑不起来 | [`backend/tests/AGENTS.md`](apps/api/backend/tests/AGENTS.md)（admin 模块自己的在 [`app/admin/tests/`](apps/api/backend/app/admin/tests/AGENTS.md)） |
 | **动权限码 / 数据范围 / token 与 cookie 时长** · **数据变更审计**（谁把哪个字段改了 · 给登记过的表加列 · 防篡改链） | [`common/security`](apps/api/backend/common/security/AGENTS.md) · [`common/data_change`](apps/api/backend/common/data_change/AGENTS.md) |
