@@ -37,6 +37,21 @@ test.describe("折叠态侧边栏", () => {
     await expect(page.getByTestId("nav-group-系统管理")).toHaveAttribute("data-active", "")
   })
 
+  test("路过一个分组、浮层刚弹出就点它下面的菜单：这一下点击不能被吞掉", async ({ authedPage: page }) => {
+    // 悬停浮层开着时 body 是 pointer-events:none（Base UI safe polygon），只放行触发器和浮层。
+    // 点在栏的右边缘 = 指针还在通往浮层的三角区里，修之前这一下落到 <html> 上、页面不动（3/3 复现）
+    await page.waitForTimeout(500) // 等折叠的宽度过渡结束再量坐标
+    const group = (await page.getByTestId("nav-group-定时任务").boundingBox())!
+    const leaf = (await page.getByTestId("nav-/notification").boundingBox())!
+    await page.mouse.move(group.x + group.width / 2, group.y + group.height / 2, { steps: 3 })
+    await expect(page.getByTestId("nav-flyout-定时任务")).toHaveAttribute("data-open", "")
+    // 用 mouse 而不是 locator.click：后者点之前会等「没被别的元素挡住」，正好把这个 bug 等没了
+    await page.mouse.move(leaf.x + leaf.width - 3, leaf.y + leaf.height / 2, { steps: 4 })
+    await page.mouse.down()
+    await page.mouse.up()
+    await expect(page).toHaveURL(/\/notification/)
+  })
+
   // 用「系统监控」不用「日志管理」：`menu-rename-disable.spec.ts` 会把 /log 临时停用，并行撞上时这里找不到分组
   test("键盘：Enter 打开、Esc 关闭并回到触发器", async ({ authedPage: page }) => {
     const trigger = page.getByTestId("nav-group-系统监控")

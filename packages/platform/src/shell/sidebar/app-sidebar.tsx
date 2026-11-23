@@ -320,7 +320,10 @@ export function AppSidebar({
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
-          <SidebarMenu data-testid="sidebar-nav">
+          {/* 🔴 pointer-events-auto：悬停浮层开着时 Base UI 把 body 设成 pointer-events:none（safe polygon，写死、不能关），
+              只放行触发器和浮层。路过一个分组、浮层刚弹出就去点它下面的菜单，指针还在通往浮层的三角区里 —— 那一下点击被吞掉（#440，实测）。
+              侧栏自己恢复成 auto，路过的分组仍要停够 120ms 才会开，不会被误触 */}
+          <SidebarMenu data-testid="sidebar-nav" className="pointer-events-auto">
             {isPending
               ? Array.from({ length: 5 }).map((_, i) => (
                   <SidebarMenuItem key={i}>

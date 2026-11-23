@@ -60,9 +60,14 @@ E2E `sidebar-collapsed.spec.ts` 4 条过；变异关掉折叠分支，浮层 / �
 存 `preferences.ts`（localStorage，「这块屏幕上我想看到什么」）。判定只有一行：`flyoutMode = !isMobile && (collapsed || submenu === 'flyout')`。
 **折叠态不看偏好，一律浮出**（内嵌在 48px 的栏里放不下）；移动端是 Sheet，一律内嵌。展开态的浮出触发器带一个不旋转的 `>`，和内嵌那个会转的区分开。
 
-🔴 **悬停打开的浮层开着时，body 是 `pointer-events: none`**（实测 `document.body.style`；鼠标移开、浮层关掉后恢复）。人会先把鼠标移开所以无感，
-但 E2E 悬停之后直接去点页面别处，Playwright 报「`<html>` intercepts pointer events」并重试到超时 —— 它在点之前不挪鼠标。先 `mouse.move` 到别处、等 `data-open` 消失再点。
+🔴 **悬停打开的浮层开着时，body 是 `pointer-events: none`**（Base UI 的 safe polygon：`MenuTrigger` 里 `blockPointerEvents: !isInMenubar` 写死，
+只把触发器和浮层设回 `auto`）。它会伤到**真实用户**：路过一个分组、浮层刚弹出就去点它下面的菜单，只要指针还在通往浮层的三角区里
+（栏的右半边），那一下点击落到 `<html>` 上、页面不动。**修法**：侧栏的 `SidebarMenu` 加 `pointer-events-auto`，侧栏自己不受影响；
+路过的分组仍要停够 120ms 才会开。页面别处照旧被挡，所以 E2E 悬停之后要点页面别处，先 `mouse.move` 走开、等 `data-open` 消失
+（否则 Playwright 报「`<html>` intercepts pointer events」重试到超时 —— 它点之前不挪鼠标）。
+测这个 bug 要用 `page.mouse.down/up`，**不能用 `locator.click`**：后者会等到「没被挡住」才点，正好把 bug 等没了。
 （d.ts 写着「menus opened by hover are never modal」，所以这不是模态遮罩，改 `modal={false}` 没用，试过。）
 
 **实测证据**（2026-11-23）：ego 本地切到「悬停浮出」，展开态悬停「日志管理」右侧弹出两项。E2E 偏好那条：展开态浮出 → 刷新还在 → 折叠照样弹 → 切回内嵌恢复（`aria-expanded="true"`、无浮层）；
 变异让展开态无视偏好 → 红在展开态浮层那一句。
+「点击不能被吞掉」那条：修前停 250ms 后点栏右边缘，3/3 停在 `/dashboard`（`document.body.style.pointerEvents === 'none'`）；修后 3/3 跳到 `/notification`，去掉 `pointer-events-auto` 当场红。
