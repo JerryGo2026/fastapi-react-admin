@@ -32,7 +32,7 @@
 | **第一次上手** | 本文件的「结构」·「本地起服务」·「硬纪律」（必读） |
 | 加列表页 / CRUD 页 · 主从页 · 监控页 · **工作台卡片 / 布局** | [`packages/platform/src/pages/AGENTS.md`](packages/platform/src/pages/AGENTS.md) · [`dashboard` 分册](packages/platform/src/pages/dashboard/AGENTS.md) |
 | 加设置屏 —— 骨架本身 / 参数配置那种 | [`_shared` 分册](packages/platform/src/pages/_shared/AGENTS.md) / [`config` 分册](packages/platform/src/pages/config/AGENTS.md) |
-| 动多页签 / 标签条 / 偏好设置 / 侧边栏 | [`packages/platform/src/shell/AGENTS.md`](packages/platform/src/shell/AGENTS.md) |
+| 动多页签 / 标签条 / 偏好设置 / 侧边栏 | [`packages/platform/src/shell/AGENTS.md`](packages/platform/src/shell/AGENTS.md) · 侧边栏 [`shell/sidebar`](packages/platform/src/shell/sidebar/AGENTS.md) |
 | 动文件上传 / 预览 / 附件 | [`packages/platform/src/pages/file/AGENTS.md`](packages/platform/src/pages/file/AGENTS.md) |
 | 动消息通知 / 铃铛 / 收件箱 · **通知公告**（读者侧 / 附件 / 谁看得见） · **通知渠道路由**（邮件 / 短信 / 群机器人 · 策略 · 投递） · **审批流** · **短信**（接新厂商 / 调 `sms_service.send()`） | [`notification`](packages/platform/src/pages/notification/AGENTS.md) · 公告后端 [`plugin/notice`](apps/api/backend/plugin/notice/AGENTS.md) · 渠道路由 [`plugin/notification`](apps/api/backend/plugin/notification/AGENTS.md) · 审批后端 [`plugin/workflow`](apps/api/backend/plugin/workflow/AGENTS.md) · 审批前端 [`pages/workflow`](packages/platform/src/pages/workflow/AGENTS.md) · 短信 [`plugin/sms`](apps/api/backend/plugin/sms/AGENTS.md) |
 | 动 AI 对话页 / 侧滑抽屉 | [`packages/platform/src/pages/ai-chat/AGENTS.md`](packages/platform/src/pages/ai-chat/AGENTS.md) |

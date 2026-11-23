@@ -136,6 +136,18 @@ export const SCROLL_MODE_LABELS: Record<ScrollMode, string> = {
   page: "整页",
 }
 
+/**
+ * 侧边栏分组在**展开态**怎么打开子菜单（#440）。折叠成图标栏时一律浮出，不受这一项影响 ——
+ * 那时内嵌展开根本放不下（见 `shell/sidebar` 分册）。默认内嵌：能同时看到多组、键盘和读屏更顺，
+ * 调研过的框架里也没有谁把悬停浮出当默认。
+ */
+export type SidebarSubmenu = "inline" | "flyout"
+
+export const SIDEBAR_SUBMENU_LABELS: Record<SidebarSubmenu, string> = {
+  inline: "内嵌展开",
+  flyout: "悬停浮出",
+}
+
 /** 多标签页外观。对齐参考实现的四种：按钮 / 卡片 / 柔和 / 下划线 */
 export type TabStyle = "button" | "card" | "soft" | "underline"
 
@@ -157,6 +169,8 @@ export type Preferences = {
   density: DensityPreset
   /** 滚动方式：只滚内容区 / 整页跟着滚 */
   scrollMode: ScrollMode
+  /** 侧边栏展开态的子菜单：点开内嵌 / 悬停从右侧浮出 */
+  sidebarSubmenu: SidebarSubmenu
   /** 顶部是否显示多标签页 */
   showTabs: boolean
   /** 多标签页外观 */
@@ -183,6 +197,7 @@ export const PREF_DEFAULTS: Preferences = {
   density: "standard",
   // 默认只滚内容区：顶栏与标签条不该被滚走 —— 多页签外壳里那是导航，不是内容
   scrollMode: "content",
+  sidebarSubmenu: "inline",
   showTabs: true,
   tabStyle: "card",
   tabMiddleClickClose: true,

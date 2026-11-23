@@ -28,7 +28,7 @@ import { Switch } from '@admin/ui/components/switch'
 import { cn } from '@admin/ui/lib/utils'
 
 import { MenuIcon } from '../../shell/icon-registry'
-import type { NavNode } from '../../shell/use-sidebar'
+import type { NavNode } from '../../shell/sidebar/use-sidebar'
 import { SegmentedControl } from '../_shared/settings-rows'
 import { QUICK_LINKS_MAX, chosenQuickLinks, moveItem, patchItem, type CardWidth, type DashboardLayout, type LayoutItem } from './layout'
 

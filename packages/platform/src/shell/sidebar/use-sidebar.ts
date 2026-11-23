@@ -1,14 +1,14 @@
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 
-import { sidebarQuery } from '../auth/queries'
-import { MenuType, type SidebarNode } from '../api-client/sidebar-types'
+import { sidebarQuery } from '../../auth/queries'
+import { MenuType, type SidebarNode } from '../../api-client/sidebar-types'
 // 🔴 shell 反过来 import 一个具体页面，方向上不太寻常——但组件沙箱**故意**不挂
 // `sys_menu`（不占用一个业务权限码，见 `sandbox/components.tsx` 的路由注释），
 // 侧边栏又是纯服务端菜单树拼出来的（见下面 `toNavTree`），没有别的地方能把
 // 「开发工具 › 组件沙箱」这一条塞进去。两个消费方（这里 + command-menu.tsx）
 // 都要看到它，所以放在这一个大家都会调用的 hook 里拼一次，不是各自拼一份。
-import { devConfigQuery, readSandboxGate } from '../pages/dev-sandbox/api'
+import { devConfigQuery, readSandboxGate } from '../../pages/dev-sandbox/api'
 
 export type NavNode = {
   /** 雪花 ID 以字符串下发，见 sidebar-types.ts */
