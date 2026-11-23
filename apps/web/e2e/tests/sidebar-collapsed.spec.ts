@@ -97,3 +97,43 @@ test.describe("折叠态侧边栏", () => {
     }
   })
 })
+
+/**
+ * 偏好「子菜单展开方式 = 悬停浮出」：展开态的分组也走浮层（#440 第二步）。默认是内嵌展开，
+ * 上面那组用例和其余 spec 跑的都是默认值；这里切过去、刷新还在、切回来恢复内嵌。
+ */
+test("偏好切到悬停浮出：展开态也从右侧弹出，刷新还在，折叠照样弹，切回内嵌恢复", async ({ authedPage: page }) => {
+  await page.goto("/profile?section=layout")
+  await page.getByTestId("pref-sidebar-submenu-flyout").click()
+  // 侧边栏是展开态，没有按 ⌘B
+  await expect(page.locator('[data-slot="sidebar"][data-state="expanded"]')).toHaveCount(1)
+
+  const trigger = page.getByTestId("nav-group-系统监控")
+  await trigger.hover()
+  await expect(page.getByTestId("nav-flyout-系统监控")).toHaveAttribute("data-open", "")
+
+  await page.reload()
+  await page.getByTestId("nav-group-系统监控").hover()
+  await expect(page.getByTestId("nav-flyout-系统监控")).toHaveAttribute("data-open", "")
+
+  // 折叠也照样浮出（偏好只管展开态；折叠态两种偏好都走浮层，默认值那一侧由上面那组用例覆盖）
+  await page.mouse.move(900, 600)
+  await expect(page.locator('[data-testid^="nav-flyout-"][data-open]')).toHaveCount(0)
+  await page.keyboard.press("ControlOrMeta+b")
+  await expect(page.locator('[data-slot="sidebar"][data-collapsible]')).toHaveAttribute("data-collapsible", "icon")
+  await page.getByTestId("nav-group-系统监控").hover()
+  await expect(page.getByTestId("nav-flyout-系统监控")).toHaveAttribute("data-open", "")
+  await page.mouse.move(900, 600)
+  await expect(page.locator('[data-testid^="nav-flyout-"][data-open]')).toHaveCount(0)
+  await page.keyboard.press("ControlOrMeta+b")
+  await expect(page.locator('[data-slot="sidebar"][data-state="expanded"]')).toHaveCount(1)
+
+  // 🔴 悬停打开的浮层开着时 body 是 `pointer-events: none`（实测），页面别处点不到 —— Playwright 报「<html> intercepts
+  // pointer events」、一直重试到超时，因为它不挪鼠标。人会先把鼠标移开、浮层关掉，这里照做
+  await page.mouse.move(900, 600)
+  await expect(page.locator('[data-testid^="nav-flyout-"][data-open]')).toHaveCount(0)
+  await page.getByTestId("pref-sidebar-submenu-inline").click()
+  await page.getByTestId("nav-group-系统监控").click()
+  await expect(page.getByTestId("nav-group-系统监控")).toHaveAttribute("aria-expanded", "true")
+  await expect(page.locator('[data-testid^="nav-flyout-"][data-open]')).toHaveCount(0)
+})

@@ -53,3 +53,16 @@ E2E `sidebar-collapsed.spec.ts` 4 条过；变异关掉折叠分支，浮层 / �
 三级菜单种子里没有：那条用 `api` 在「系统管理」下临时建「目录 → 外链」。⚠️ 别的 spec 会临时停用 /log，折叠态用例别拿「日志管理」测。
 - `closeDelay` 要 ≤ `delay`：分组是各自独立的菜单、不互相协调，反过来在相邻分组间移动时两个浮层会叠在一起
 - ⚠️ `SidebarProvider` 只写 `sidebar_state` cookie、不读：整页刷新后侧栏回到展开态。E2E 刷新后要再按一次 ⌘B
+
+## 展开态的子菜单展开方式是偏好（`sidebarSubmenu`，#440 第二步）
+
+个人中心 →「布局」→「子菜单展开方式」：`inline`（默认，点开内嵌展开）/ `flyout`（悬停从右侧弹出）。
+存 `preferences.ts`（localStorage，「这块屏幕上我想看到什么」）。判定只有一行：`flyoutMode = !isMobile && (collapsed || submenu === 'flyout')`。
+**折叠态不看偏好，一律浮出**（内嵌在 48px 的栏里放不下）；移动端是 Sheet，一律内嵌。展开态的浮出触发器带一个不旋转的 `>`，和内嵌那个会转的区分开。
+
+🔴 **悬停打开的浮层开着时，body 是 `pointer-events: none`**（实测 `document.body.style`；鼠标移开、浮层关掉后恢复）。人会先把鼠标移开所以无感，
+但 E2E 悬停之后直接去点页面别处，Playwright 报「`<html>` intercepts pointer events」并重试到超时 —— 它在点之前不挪鼠标。先 `mouse.move` 到别处、等 `data-open` 消失再点。
+（d.ts 写着「menus opened by hover are never modal」，所以这不是模态遮罩，改 `modal={false}` 没用，试过。）
+
+**实测证据**（2026-11-23）：ego 本地切到「悬停浮出」，展开态悬停「日志管理」右侧弹出两项。E2E 偏好那条：展开态浮出 → 刷新还在 → 折叠照样弹 → 切回内嵌恢复（`aria-expanded="true"`、无浮层）；
+变异让展开态无视偏好 → 红在展开态浮层那一句。

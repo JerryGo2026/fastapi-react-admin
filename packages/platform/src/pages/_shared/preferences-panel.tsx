@@ -6,6 +6,8 @@ import {
   IconDeviceDesktop,
   IconLayout,
   IconLayoutNavbarCollapse,
+  IconLayoutSidebarRightExpand,
+  IconListTree,
   IconMoon,
   IconPalette,
   IconRotate2,
@@ -17,6 +19,7 @@ import {
   DENSITY_PRESETS,
   RADIUS_PRESETS,
   SCROLL_MODE_LABELS,
+  SIDEBAR_SUBMENU_LABELS,
   TAB_STYLE_LABELS,
   THEME_COLORS,
   THEME_MODE_LABELS,
@@ -24,6 +27,7 @@ import {
   type DensityPreset,
   type RadiusPreset,
   type ScrollMode,
+  type SidebarSubmenu,
   type TabStyle,
   type ThemeColor,
   type ThemeMode,
@@ -44,7 +48,7 @@ import {
  * 偏好改完立刻看得到效果，再点一次保存是多余的一步。
  *
  * 只放**真的接通了的**开关。界面密度通过根节点令牌即时生效；布局模式（经典侧栏/嵌入式/浮动式）
- * 仍没有侧边栏变体支撑，所以「布局」这一节现在只有滚动方式一项。
+ * 仍没有侧边栏变体支撑，所以「布局」这一节现在只有滚动方式和侧边栏子菜单展开方式两项。
  *
  * ⚠️ 这里导出的是**面板描述数组**而不是一个完整组件：外壳（左侧竖导航 + 内容列封顶）
  * 由调用方 `profile/index.tsx` 统一持有，账号类面板和外观类面板要并进**同一条**导航。
@@ -76,6 +80,15 @@ const SCROLL_MODES: ScrollMode[] = ["content", "page"]
 const SCROLL_ICON: Record<ScrollMode, React.ReactNode> = {
   content: <IconLayoutNavbarCollapse className="size-3.5" />,
   page: <IconArrowsVertical className="size-3.5" />,
+}
+const SIDEBAR_SUBMENUS: SidebarSubmenu[] = ["inline", "flyout"]
+const SIDEBAR_SUBMENU_ICON: Record<SidebarSubmenu, React.ReactNode> = {
+  inline: <IconListTree className="size-3.5" />,
+  flyout: <IconLayoutSidebarRightExpand className="size-3.5" />,
+}
+const SIDEBAR_SUBMENU_CAPTION: Record<SidebarSubmenu, string> = {
+  inline: "点开后在列表里展开",
+  flyout: "鼠标移上去从右侧弹出",
 }
 /** 副标写「会发生什么」，因为「内容区域 / 整页」这两个词本身分不出差别 */
 const SCROLL_CAPTION: Record<ScrollMode, string> = {
@@ -228,6 +241,22 @@ export function usePreferencePanels(): SettingsPanel[] {
                   label: t(SCROLL_MODE_LABELS[m]),
                   caption: t(SCROLL_CAPTION[m]),
                   icon: SCROLL_ICON[m],
+                }))}
+              />
+            </SettingRow>
+            <SettingRow
+              label={t("子菜单展开方式")}
+              description={t("侧边栏展开时，分组菜单怎么打开子菜单。折叠成图标栏时一律从右侧弹出")}
+            >
+              <SegmentedControl<SidebarSubmenu>
+                value={prefs.sidebarSubmenu}
+                testId="pref-sidebar-submenu"
+                onChange={(v) => patch({ sidebarSubmenu: v })}
+                options={SIDEBAR_SUBMENUS.map((m) => ({
+                  value: m,
+                  label: t(SIDEBAR_SUBMENU_LABELS[m]),
+                  caption: t(SIDEBAR_SUBMENU_CAPTION[m]),
+                  icon: SIDEBAR_SUBMENU_ICON[m],
                 }))}
               />
             </SettingRow>

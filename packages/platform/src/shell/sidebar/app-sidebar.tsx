@@ -40,6 +40,7 @@ import { cn } from '@admin/ui/lib/utils'
 
 import { usePerm } from '../../auth/use-perm'
 import { MenuIcon } from '../icon-registry'
+import { usePreferences } from '../preferences'
 import { useSidebar, type NavNode, type SidebarOptions } from './use-sidebar'
 
 /**
@@ -62,7 +63,10 @@ function NavItem({
 }) {
   const { t } = useTranslation()
   const { state, isMobile } = useSidebarLayout()
-  const railMode = state === 'collapsed' && !isMobile
+  const submenu = usePreferences((p) => p.sidebarSubmenu)
+  const collapsed = state === 'collapsed' && !isMobile
+  // 折叠态一律浮出（内嵌放不下）；展开态看偏好。移动端是 Sheet，永远内嵌
+  const flyoutMode = !isMobile && (collapsed || submenu === 'flyout')
   const hasChildren = node.children.length > 0
   const isActive = node.path === activePath
   const containsActive = React.useMemo(
@@ -115,10 +119,10 @@ function NavItem({
     )
   }
 
-  // ── 折叠态的分组：悬停 / 点击从右侧浮出子菜单（#440） ──
-  // 🔴 不能沿用下面的 Collapsible：`SidebarMenuSub` 在 `collapsible=icon` 下是 display:none，
+  // ── 浮出式分组：悬停 / 点击从右侧浮出子菜单（#440）。折叠态必走，展开态由偏好「悬停浮出」打开 ──
+  // 🔴 折叠态不能沿用下面的 Collapsible：`SidebarMenuSub` 在 `collapsible=icon` 下是 display:none，
   // 点了只会把 aria-expanded 翻成 true，什么都不出现 —— 折叠后 12 个一级菜单里 10 个是这种死按钮
-  if (railMode && !nested) {
+  if (flyoutMode && !nested) {
     return (
       <SidebarMenuItem>
         <DropdownMenu>
@@ -134,6 +138,8 @@ function NavItem({
           >
             <MenuIcon name={node.icon} />
             <span>{title}</span>
+            {/* 展开态要一个「往右开」的提示，和内嵌展开那个会旋转的箭头区分开；折叠态按钮缩成图标，这个被裁掉 */}
+            {!collapsed && <IconChevronRight className="ms-auto size-4 shrink-0 opacity-60" />}
           </DropdownMenuTrigger>
           <DropdownMenuContent
             side="right"
