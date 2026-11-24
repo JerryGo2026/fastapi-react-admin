@@ -60,6 +60,10 @@ file-viewer 一条真的懒加载链。所以那个触发点很窄，而更常�
   给 `deploy/prod.sh` 和后端对账、给「关于」弹窗（帮助菜单，`shell/about-dialog.tsx`）显示用。
   ⚠️ 那份 JSON 要保持紧凑的一行，原因见 [`deploy` 分册](../../deploy/AGENTS.md)「线上是哪一版」
 
+提示本身是 `src/components/update-notice.tsx` 那张卡片（#444）：品牌色、新旧版本号、实心「立即刷新」+「稍后」。
+它走 `toast.custom`（`packages/ui` 的通用插槽），**不要另起一个 fixed 浮层** —— 右上角同时弹的别的 toast 会和它撞在同一个角上，
+走同一个视口才会排队。`version.json` 的 `version` 只拿来显示，判据照旧是 `buildId`。
+
 开发期 `apply: 'build'` 让插件整个不生效，`BUILD_ID` 回落成 `dev`，
 `/version.json` 404 → 检测静默跳过（dev 没有「发版」这件事）。
 E2E 靠 `page.route` 造一个不同的 `buildId` 来验，见

@@ -123,7 +123,38 @@ function push(tone: ToastTone, title: React.ReactNode, opts: Options = {}) {
   return id
 }
 
+/**
+ * 自定义内容的那一份 payload，挂在 Base UI 的 `data` 上。
+ * `render` 收到 `close`，卡片自己的「稍后 / 立即刷新」按钮靠它关掉这一条。
+ */
+type CustomData = { render: (close: () => void) => React.ReactNode }
+
+function isCustom(data: unknown): data is CustomData {
+  return typeof data === "object" && data !== null && typeof (data as CustomData).render === "function"
+}
+
+/**
+ * 整张卡片由调用方画，但仍然走同一个视口：叠放、滑动关闭、进退场动画、
+ * 读屏播报都和其它 toast 一致 —— 另起一个 fixed 浮层会和这里的 toast 撞在同一个角上。
+ *
+ * 调用方的内容里用 `ToastTitle` / `ToastDescription` 标出标题和描述，
+ * 读屏才知道这条提示在说什么（Base UI 靠它们关联 `aria-labelledby`）。
+ */
+function pushCustom(render: CustomData["render"], opts: { timeout?: number } = {}) {
+  const id: string = manager.add<CustomData>({
+    type: "custom",
+    timeout: opts.timeout ?? 4500,
+    data: { render },
+  })
+  return id
+}
+
+export const ToastTitle = ToastPrimitive.Title
+export const ToastDescription = ToastPrimitive.Description
+
 export const toast = {
+  /** 整张卡片自己画（见 `pushCustom`）。返回 id */
+  custom: (render: CustomData["render"], opts?: { timeout?: number }) => pushCustom(render, opts),
   /** 中性通知，不带语气色 */
   message: (title: React.ReactNode, opts?: Options) => push("message", title, opts),
   info: (title: React.ReactNode, opts?: Options) => push("info", title, opts),
@@ -158,17 +189,59 @@ const TONE_CLASS: Record<ToastTone, string> = {
   loading: "text-muted-foreground",
 }
 
+/** 进退场 + 跟手滑动，普通条目和自定义卡片共用 */
+function motionClass(fromTop: boolean) {
+  return cn(
+    "translate-x-[var(--toast-swipe-movement-x)] translate-y-[var(--toast-swipe-movement-y)] transition-all duration-200",
+    // 进场从锚定边浮起，离场缩一点淡出；被 limit 顶掉的直接淡出
+    fromTop
+      ? "data-[starting-style]:-translate-y-3 data-[starting-style]:opacity-0"
+      : "data-[starting-style]:translate-y-3 data-[starting-style]:opacity-0",
+    "data-[ending-style]:scale-[0.97] data-[ending-style]:opacity-0",
+    "data-[limited]:opacity-0",
+    // 拖动过程中不要再叠一层过渡，否则跟手会有橡皮筋感
+    "data-[swiping]:transition-none"
+  )
+}
+
 function ToastItem({ toast: item }: { toast: ToastPrimitive.Root.ToastObject }) {
   const t = useT()
   const position = React.useContext(ToastPositionContext)
-  // promise() 的 loading 阶段不带 type，按 loading 处理（转圈比信息图标准）
-  const tone = (item.type as ToastTone | undefined) ?? "loading"
-  const Icon = TONE_ICON[tone] ?? IconInfoCircle
-  const spinning = tone === "loading"
   // 顶部方位从上方落下，底部方位从下方浮起 —— 位置能切换后，
   // 进场动画方向也要跟着方位走，否则顶部的 toast 会「先往下缩一截再定住」
   const fromTop = position.startsWith("top")
 
+  if (isCustom(item.data)) {
+    const { render } = item.data
+    return (
+      <ToastPrimitive.Root
+        toast={item}
+        data-testid="toast"
+        data-tone="custom"
+        swipeDirection={["right", "down"]}
+        className={cn("relative w-full", motionClass(fromTop))}
+      >
+        {render(() => manager.close(item.id))}
+      </ToastPrimitive.Root>
+    )
+  }
+
+  return <ToneToast item={item} fromTop={fromTop} closeLabel={t("关闭")} />
+}
+
+function ToneToast({
+  item,
+  fromTop,
+  closeLabel,
+}: {
+  item: ToastPrimitive.Root.ToastObject
+  fromTop: boolean
+  closeLabel: string
+}) {
+  // promise() 的 loading 阶段不带 type，按 loading 处理（转圈比信息图标准）
+  const tone = (item.type as ToastTone | undefined) ?? "loading"
+  const Icon = TONE_ICON[tone] ?? IconInfoCircle
+  const spinning = tone === "loading"
   return (
     <ToastPrimitive.Root
       toast={item}
@@ -179,15 +252,7 @@ function ToastItem({ toast: item }: { toast: ToastPrimitive.Root.ToastObject }) 
       swipeDirection={["right", "down"]}
       className={cn(
         "group/toast relative flex w-full items-start gap-3 rounded-lg border border-border bg-popover p-3.5 pe-9 text-popover-foreground shadow-lg",
-        "translate-x-[var(--toast-swipe-movement-x)] translate-y-[var(--toast-swipe-movement-y)] transition-all duration-200",
-        // 进场从锚定边浮起，离场缩一点淡出；被 limit 顶掉的直接淡出
-        fromTop
-          ? "data-[starting-style]:-translate-y-3 data-[starting-style]:opacity-0"
-          : "data-[starting-style]:translate-y-3 data-[starting-style]:opacity-0",
-        "data-[ending-style]:scale-[0.97] data-[ending-style]:opacity-0",
-        "data-[limited]:opacity-0",
-        // 拖动过程中不要再叠一层过渡，否则跟手会有橡皮筋感
-        "data-[swiping]:transition-none"
+        motionClass(fromTop)
       )}
     >
       <Icon className={cn("mt-px size-4 shrink-0", TONE_CLASS[tone], spinning && "animate-spin")} />
@@ -199,7 +264,7 @@ function ToastItem({ toast: item }: { toast: ToastPrimitive.Root.ToastObject }) 
         )}
       </div>
       <ToastPrimitive.Close
-        aria-label={t("关闭")}
+        aria-label={closeLabel}
         className="absolute end-2 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
       >
         <IconX className="size-3.5" />
