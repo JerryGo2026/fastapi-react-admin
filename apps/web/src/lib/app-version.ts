@@ -1,5 +1,9 @@
-import { t } from "@admin/i18n"
+import { createElement } from "react"
+
 import { toast } from "@admin/ui/components/toast"
+
+import { UpdateNotice } from "@/components/update-notice"
+import { BRAND } from "@/lib/brand"
 
 /**
  * 「服务端发新版了」的检测。
@@ -71,28 +75,60 @@ let notified = false
 /**
  * 提示一次就够。**不自动刷新** —— 中后台的用户可能正在填一张长表单，
  * 替他刷新等于把没提交的东西扔了。给一个按钮，什么时候刷由他定。
+ *
+ * `nextVersion` 是服务器上那一版的版本号（`version.json` 的 `version`），只用来显示。
+ * 懒加载失败那条路手里没有它，就现取一次；取不到照样弹，只是不显示版本那一行。
  */
-export function notifyNewVersion() {
+export async function notifyNewVersion(nextVersion?: string | null) {
   if (notified) return
   notified = true
-  toast.warning(t("已发布新版本"), {
-    description: t("当前页面用的还是旧版前端，刷新后继续使用。"),
-    // 0 = 不自动消失：这条自己溜走就等于没提示
-    timeout: 0,
-    action: { label: t("刷新"), onClick: () => window.location.reload() },
-  })
+  const next =
+    nextVersion === undefined
+      ? ((await fetchServed())?.version ?? null)
+      : nextVersion
+  showUpdateNotice(next)
 }
 
-async function fetchBuildId(): Promise<string | null> {
+/**
+ * 弹那张卡片（#444）。**不自动消失**（`timeout: 0`）：这条自己溜走就等于没提示。
+ * 同一个版本号重新构建（换了基础镜像之类）时，「v1.1.3 → v1.1.3」是噪音，不显示版本那一行。
+ */
+function showUpdateNotice(nextVersion: string | null) {
+  const current = BRAND.version
+  const next = nextVersion ? `v${nextVersion.replace(/^v/, "")}` : null
+  const versions = next && next !== current ? { current, next } : null
+  toast.custom(
+    (close) => createElement(UpdateNotice, { versions, onLater: close }),
+    { timeout: 0 }
+  )
+}
+
+type Served = { buildId: string; version: string | null }
+
+async function fetchServed(): Promise<Served | null> {
+  // 懒加载失败那条路也会走到这里，那时服务器可能正在重启 —— 别让提示等一个挂住的请求。
+  // 手写超时而不是 `AbortSignal.timeout()`：老浏览器没有那个静态方法，调用会抛错、
+  // 被下面的 catch 吞掉，于是每一次轮询都返回 null，新版检测整个静默失效（#445 评审）
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 5000)
   try {
-    const res = await fetch("/version.json", { cache: "no-store" })
+    const res = await fetch("/version.json", {
+      cache: "no-store",
+      signal: ctrl.signal,
+    })
     if (!res.ok) return null
     // 开发期没有这个文件，vite 可能回落成 index.html（HTML 进不了 JSON.parse）——
     // 拿不到就当「这个环境没有版本信息」，静默跳过，不要报错也不要提示
-    const body = (await res.json()) as { buildId?: unknown }
-    return typeof body.buildId === "string" ? body.buildId : null
+    const body = (await res.json()) as { buildId?: unknown; version?: unknown }
+    if (typeof body.buildId !== "string") return null
+    return {
+      buildId: body.buildId,
+      version: typeof body.version === "string" ? body.version : null,
+    }
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -105,8 +141,10 @@ export function installVersionWatch(): () => void {
   const check = async () => {
     if (notified) return
     lastCheck = Date.now()
-    const served = await fetchBuildId()
-    if (served && served !== BUILD_ID) notifyNewVersion()
+    const served = await fetchServed()
+    // 新版检测**只认 `buildId`**；`version` 只是给卡片显示的（见 apps/web 分册）
+    if (served && served.buildId !== BUILD_ID)
+      void notifyNewVersion(served.version)
   }
 
   const onWake = () => {
@@ -116,11 +154,11 @@ export function installVersionWatch(): () => void {
   }
 
   const onRejection = (e: PromiseRejectionEvent) => {
-    if (isStaleAssetError(e.reason)) notifyNewVersion()
+    if (isStaleAssetError(e.reason)) void notifyNewVersion()
   }
 
   const onError = (e: ErrorEvent) => {
-    if (isStaleAssetError(e.error ?? e.message)) notifyNewVersion()
+    if (isStaleAssetError(e.error ?? e.message)) void notifyNewVersion()
   }
 
   void check()
