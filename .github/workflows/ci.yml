@@ -540,8 +540,10 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     # 整套约 13 分钟（2 个 worker）；login-phone.spec.ts 要等一次 60 秒的短信冷却。15 分钟撞过一次上限（#171），
-    # 症状是 job 显示 cancelled 而列表报告里 121 条全过。2026-11-09 main 上已经要 19.5 分钟（20 分钟的上限只剩半分钟），放到 30
-    timeout-minutes: 30
+    # 症状是 job 显示 cancelled 而列表报告里 121 条全过。2026-11-09 main 上已经要 19.5 分钟（20 分钟的上限只剩半分钟），放到 30。
+    # 2026-11-24 最近几次是 21 / 22 / 22 / 25 / 29 分钟，#445 那次撞上 30 分钟上限（job 显示 cancelled，
+    # 步骤日志里 `pnpm e2e` 之后 29 分钟一行输出都没有，不知道卡在哪），放到 40 留余量
+    timeout-minutes: 40
 
     env:
       DATABASE_TYPE: sqlserver
@@ -640,11 +642,16 @@ jobs:
   # 🔴 只在 main 上跑（`pull_request` 事件的 `github.ref` 是 `refs/pull/N/merge`，
   # 天然被这条 if 挡掉）—— fork 来的 PR 拿不到 pages 写权限，硬跑会直接失败；
   # 就算是本仓库自己的 PR，也不该让报告链接被一次性的分支覆盖掉。
-  # `if: always()` 是因为最想看报告的时候往往就是 E2E 挂了的那一次。
+  # `if: !cancelled()` 是因为最想看报告的时候往往就是 E2E 挂了的那一次。
+  # 🔴 不能写 `always()`：连着合几个 PR 时，concurrency 会取消前一个 main 运行，
+  # `always()` 照样把这个 job 跑起来，而 E2E 被取消、没有报告，部署前的下载就报错，
+  # 在 Environments 页面留下一串红叉（#418 / #424 / #438 一带）。`!cancelled()` 对
+  # 「整个 run 被取消」为假、直接跳过；而 E2E 自己超时被杀时 run 并没有被取消，
+  # 这个 job 照跑，文档站还是会发。
   pages:
     name: 发布文档站和 E2E 报告到 Pages
     needs: [test-e2e]
-    if: always() && github.ref == 'refs/heads/main'
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
       # job 级写了 permissions，没列出来的一律是 none —— 下面 checkout 文档站源码要读权限
@@ -725,6 +732,27 @@ jobs:
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: apps/docs/dist
+
+      # 🔴 upload-pages-artifact 刚报「finalized」，artifact 列表不一定立刻查得到：
+      # 2026-11-22（#1033）和 2026-11-24（#1053）两次，deploy-pages 在上传完成后约 1 秒去查，
+      # 都是 `Found 0/1 artifact(s)` → `No artifacts named "github-pages" were found`，
+      # 而成功的那次同一时刻查到的是 `Found 2`。所以部署前先等它出现在列表里（最多 60 秒）。
+      # 等不到也不让这一步失败，照样交给 deploy-pages 去试一次。
+      - name: 等 github-pages artifact 出现在列表里
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 12); do
+            n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "github-pages")] | length')
+            if [ "$n" = 1 ]; then
+              echo "github-pages artifact 已可查（第 $i 次）"
+              exit 0
+            fi
+            echo "第 $i 次：列表里有 $n 份 github-pages，5 秒后再查"
+            sleep 5
+          done
+          echo "::warning::60 秒内没在 artifact 列表里等到 github-pages，仍交给 deploy-pages 尝试"
 
       - name: 部署前核对 main 当前提交
         id: pages-head
