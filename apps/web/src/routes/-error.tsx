@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next'
+import { IconRefresh } from "@tabler/icons-react"
 import { Button } from "@admin/ui/components/button"
 
 import { isStaleAssetError } from "@/lib/app-version"
@@ -37,13 +38,14 @@ export function ErrorPage({ error: thrown }: { error?: unknown }) {
     return (
       <div className="flex min-h-svh flex-col items-center justify-center gap-4 p-6 text-center">
         <div className="space-y-1">
-          <h1 className="text-lg font-semibold">{t('已发布新版本')}</h1>
+          <h1 className="text-lg font-semibold">{t('新版本已就绪')}</h1>
           <p className="max-w-md text-sm text-muted-foreground">
             {t('当前页面用的还是旧版前端，刷新后继续使用。')}
           </p>
         </div>
         <Button onClick={() => window.location.reload()} data-testid="stale-reload">
-          {t('刷新')}
+          <IconRefresh data-icon="inline-start" />
+          {t('立即刷新')}
         </Button>
       </div>
     )

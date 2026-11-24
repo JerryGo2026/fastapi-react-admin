@@ -106,11 +106,15 @@ function showUpdateNotice(nextVersion: string | null) {
 type Served = { buildId: string; version: string | null }
 
 async function fetchServed(): Promise<Served | null> {
+  // 懒加载失败那条路也会走到这里，那时服务器可能正在重启 —— 别让提示等一个挂住的请求。
+  // 手写超时而不是 `AbortSignal.timeout()`：老浏览器没有那个静态方法，调用会抛错、
+  // 被下面的 catch 吞掉，于是每一次轮询都返回 null，新版检测整个静默失效（#445 评审）
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 5000)
   try {
-    // 懒加载失败那条路也会走到这里，那时服务器可能正在重启 —— 别让提示等一个挂住的请求
     const res = await fetch("/version.json", {
       cache: "no-store",
-      signal: AbortSignal.timeout(5000),
+      signal: ctrl.signal,
     })
     if (!res.ok) return null
     // 开发期没有这个文件，vite 可能回落成 index.html（HTML 进不了 JSON.parse）——
@@ -123,6 +127,8 @@ async function fetchServed(): Promise<Served | null> {
     }
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 

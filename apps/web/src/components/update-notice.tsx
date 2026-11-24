@@ -122,11 +122,12 @@ export function UpdateNotice({
 
 /**
  * 榫头从左边滑进卯眼、咬合时整块轻轻一顿 —— 只在出现时演一次，不循环（常驻的卡片一直动是干扰）。
- * 颜色全走 `--primary`：主题色偏好换成什么，这张卡片跟着换。
+ * 颜色全走 `--primary-ink`（不是裸 `--primary`）：主题色偏好换成什么，这张卡片跟着换，
+ * 深色下也跟着提亮 —— 裸 `--primary` 在深色里还是原来那个深靛蓝（见 ui 分册）。
  */
 const CSS = `
 .update-notice-rail {
-  background: linear-gradient(90deg, var(--primary) 0%, color-mix(in oklch, var(--primary) 55%, oklch(0.7 0.2 350)) 60%, transparent 100%);
+  background: linear-gradient(90deg, var(--primary-ink) 0%, color-mix(in oklch, var(--primary-ink) 55%, oklch(0.7 0.2 350)) 60%, transparent 100%);
 }
 .update-notice-tenon {
   transform-box: fill-box;
